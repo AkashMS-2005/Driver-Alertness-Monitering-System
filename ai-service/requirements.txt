@@ -1,8 +1,10 @@
 # AI Service dependencies (Laptop 1)
+# Phase 2: Drowsiness detection
 opencv-python>=4.8.0
 mediapipe>=0.10.0
 numpy>=1.24.0
-websockets>=12.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
-scipy>=1.11.0
+
+# Phase 3 (WebSocket server — not yet used)
+websockets>=12.0
