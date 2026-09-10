@@ -7,6 +7,7 @@ Main entry point for the backend server. Handles:
 - Risk Engine processing (Phase 4)
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from app.websocket.driver_socket import router as driver_ws_router
 from app.websocket.owner_socket import router as owner_ws_router
 from app.db.database import init_db
 from app.services.ai_connection_service import ai_connection_service
+from app.ai_client.ai_ws_client import ai_ws_client
 from app.api.v1.ai_connection_routes import set_ai_connection_state
 
 logger = logging.getLogger("smartdrive")
@@ -36,8 +38,10 @@ async def lifespan(app: FastAPI):
 
     # Register AI connection state for the REST endpoint
     set_ai_connection_state(ai_connection_service.get_state())
-    logger.info(f"AI Service target: ws://{settings.AI_SERVER_HOST}:{settings.AI_SERVER_PORT}/ws/ai")
-    logger.info("AI WebSocket client: will be started in Phase 3")
+    logger.info(f"AI Service target: {settings.ai_ws_url}")
+
+    # Start AI WebSocket Client background worker
+    ai_task = asyncio.create_task(ai_ws_client.start())
 
     logger.info(f"Backend ready at http://{settings.BACKEND_HOST}:{settings.BACKEND_PORT}")
     logger.info("=" * 60)
@@ -46,6 +50,13 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("SmartDrive Guardian Backend — Shutting down")
+    await ai_ws_client.stop()
+    ai_task.cancel()
+    try:
+        await ai_task
+    except asyncio.CancelledError:
+        pass
+
 
 
 app = FastAPI(

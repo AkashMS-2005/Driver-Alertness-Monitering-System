@@ -26,6 +26,7 @@ from src.classifiers.drowsiness_classifier import (
     STATE_DROWSY,
     STATE_MICROSLEEP,
 )
+from src.network.ai_ws_server import AIWebSocketServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,11 +64,10 @@ def trigger_alarm(state: str):
         _alarm_active = False
 
 
-def draw_debug_info(frame, eye_data, mouth_data, temporal_data, drowsiness_data, landmarks, fps):
+def draw_debug_info(frame, eye_data, mouth_data, temporal_data, drowsiness_data, landmarks, fps, client_count=0):
     """Draw debugging information on the OpenCV frame.
 
-    Shows EAR, MAR, state, PERCLOS, durations — but only in the debug window.
-    None of this is sent to the frontend.
+    Shows EAR, MAR, state, PERCLOS, durations in the local debug window.
     """
     h, w = frame.shape[:2]
     state = drowsiness_data["state"]
@@ -107,6 +107,10 @@ def draw_debug_info(frame, eye_data, mouth_data, temporal_data, drowsiness_data,
     yawn_text = f"Yawns: {temporal_data['yawn_count']}"
     cv2.putText(frame, yawn_text, (10, 145), font, 0.6, (255, 255, 255), 1)
 
+    # WS Clients info
+    ws_text = f"WS Clients: {client_count}"
+    cv2.putText(frame, ws_text, (10, 170), font, 0.5, (200, 200, 200), 1)
+
     # FPS
     fps_text = f"FPS: {fps:.0f}"
     cv2.putText(frame, fps_text, (w - 110, 30), font, 0.6, (200, 200, 200), 1)
@@ -129,28 +133,35 @@ def draw_debug_info(frame, eye_data, mouth_data, temporal_data, drowsiness_data,
 def build_result(eye_data, mouth_data, temporal_data, drowsiness_data):
     """Build the current detection result object.
 
-    This is what will be sent over WebSocket in Phase 3.
+    Sent over WebSocket to Laptop 2 FastAPI Backend.
     """
     return {
         "type": "drowsiness",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "state": drowsiness_data["state"],
-        "ear": eye_data["ear"],
-        "eye_closed": eye_data["eye_closed"],
-        "closed_duration": temporal_data["closed_duration"],
-        "perclos": temporal_data["perclos"],
-        "mar": mouth_data["mar"],
-        "yawning": mouth_data["yawning"],
+        "ear": round(float(eye_data.get("ear", 0.0)), 3),
+        "eye_closed": bool(eye_data.get("eye_closed", False)),
+        "closed_duration": round(float(temporal_data.get("closed_duration", 0.0)), 2),
+        "perclos": round(float(temporal_data.get("perclos", 0.0)), 1),
+        "mar": round(float(mouth_data.get("mar", 0.0)), 3),
+        "yawning": bool(mouth_data.get("yawning", False)),
         "alert_message": drowsiness_data.get("alert_message"),
     }
 
 
 def run_pipeline():
-    """Run the drowsiness detection pipeline."""
+    """Run the drowsiness detection pipeline and WebSocket server."""
     logger.info("=" * 60)
-    logger.info("SmartDrive Guardian AI Service — Phase 2")
-    logger.info("Drowsiness Detection Pipeline")
+    logger.info("SmartDrive Guardian AI Service — Phase 3")
+    logger.info("Drowsiness Detection Pipeline & WebSocket Server")
     logger.info("=" * 60)
+
+    # Start WebSocket Server for Laptop 2
+    ws_server = AIWebSocketServer(
+        host=settings.AI_SERVER_HOST,
+        port=settings.AI_SERVER_PORT,
+    )
+    ws_server.start()
 
     # Initialize camera
     camera = CameraStream(
@@ -161,6 +172,7 @@ def run_pipeline():
     )
     if not camera.open():
         logger.error("Cannot open camera. Exiting.")
+        ws_server.stop()
         return
 
     # Initialize face landmark detector
@@ -168,17 +180,19 @@ def run_pipeline():
     if not detector.initialize():
         logger.error("Cannot initialize face detector. Exiting.")
         camera.release()
+        ws_server.stop()
         return
 
     # Initialize temporal analyzer
     temporal = TemporalAnalyzer()
 
-    logger.info("Pipeline ready. Press 'q' to quit.")
+    logger.info(f"AI Service ready. Streaming on ws://{settings.AI_SERVER_HOST}:{settings.AI_SERVER_PORT}/ws/ai")
+    logger.info("Press 'q' in the camera window to quit.")
     logger.info("-" * 60)
 
     # Default state when no face is detected
-    no_face_eye = {"left_ear": 0, "right_ear": 0, "ear": 0, "eye_closed": False}
-    no_face_mouth = {"mar": 0, "yawning": False}
+    no_face_eye = {"left_ear": 0.0, "right_ear": 0.0, "ear": 0.0, "eye_closed": False}
+    no_face_mouth = {"mar": 0.0, "yawning": False}
     no_face_drowsiness = {"state": STATE_NORMAL, "alert_message": None}
 
     frame_count = 0
@@ -224,6 +238,9 @@ def run_pipeline():
                 # Build result for Phase 3
                 result = build_result(eye_data, mouth_data, temporal_data, drowsiness_data)
 
+                # Broadcast over WebSocket to Laptop 2
+                ws_server.broadcast_sync(result)
+
                 # Log state changes
                 if drowsiness_data["state"] != STATE_NORMAL:
                     logger.warning(
@@ -241,6 +258,9 @@ def run_pipeline():
                 drowsiness_data = no_face_drowsiness
                 trigger_alarm(STATE_NORMAL)
 
+                result = build_result(eye_data, mouth_data, temporal_data, drowsiness_data)
+                ws_server.broadcast_sync(result)
+
             # Calculate FPS
             frame_count += 1
             elapsed = time.time() - fps_start
@@ -252,7 +272,8 @@ def run_pipeline():
             # Draw debug info on the frame
             draw_debug_info(
                 frame, eye_data, mouth_data, temporal_data,
-                drowsiness_data, landmarks, fps
+                drowsiness_data, landmarks, fps,
+                client_count=ws_server.client_count
             )
 
             # Show "NO FACE" overlay if applicable
@@ -277,10 +298,13 @@ def run_pipeline():
 
     finally:
         # Cleanup
+        ws_server.stop()
         detector.close()
         camera.release()
+        cv2.destroyAllWindows()
         logger.info("Pipeline stopped.")
 
 
 if __name__ == "__main__":
     run_pipeline()
+
