@@ -1,0 +1,54 @@
+# SmartDrive Guardian — AI Detection Thresholds
+# These are internal tuning parameters. None of these values are ever sent to the frontend.
+
+eye_state:
+  # Eye Aspect Ratio (EAR) thresholds
+  ear_threshold: 0.22          # Below this = eyes closed
+  ear_drowsy_threshold: 0.25   # Below this = eyes drooping
+  blink_duration_ms: 300       # Normal blink duration
+  prolonged_closure_ms: 1500   # Eyes closed this long = drowsy signal
+
+drowsiness:
+  # Temporal analysis windows
+  window_size_seconds: 60      # Rolling window for drowsiness assessment
+  blink_rate_low: 8            # Blinks/min below this = possible fatigue
+  blink_rate_high: 25          # Blinks/min above this = possible fatigue
+  microsleep_threshold_ms: 500 # Closure > this without full blink = microsleep
+  fatigue_level_thresholds:
+    low: 30                    # Below = Alert
+    moderate: 50               # Below = Drowsy  
+    high: 70                   # Below = Fatigued
+    critical: 85               # Above = Critical
+
+head_pose:
+  # Head orientation thresholds (degrees)
+  yaw_distraction: 30          # Looking left/right beyond this = distracted
+  pitch_down_distraction: 25   # Looking down beyond this = distracted (phone)
+  pitch_up_limit: 35           # Head tilted back beyond this = possible incapacitation
+  sustained_deviation_ms: 2000 # Must exceed threshold for this duration
+
+distraction:
+  # Distraction assessment
+  window_size_seconds: 30
+  mild_deviation_count: 2      # Glances away per window
+  significant_deviation_count: 5
+  severe_deviation_count: 8
+
+incapacitation:
+  # Possible driver incapacitation (NOT medical diagnosis)
+  no_movement_threshold_ms: 5000    # No head/eye movement for this long
+  eyes_closed_threshold_ms: 4000    # Eyes continuously closed
+  head_slump_angle: 40              # Head drooped beyond this angle
+  confirmation_window_ms: 8000      # Must persist for this duration to confirm
+
+mouth_state:
+  # Mouth Aspect Ratio (MAR) — yawn detection
+  mar_threshold: 0.6           # Above this = mouth wide open (yawn)
+  yawn_duration_ms: 1500       # Sustained opening = confirmed yawn
+  yawn_rate_threshold: 3       # Yawns per 5 minutes = fatigue signal
+
+state_smoother:
+  # Debounce / smoothing
+  min_state_duration_ms: 1000       # Minimum time in a state before transition
+  cooldown_after_alert_ms: 5000     # Don't re-alert within this window
+  recovery_confirmation_ms: 3000    # Must show recovery for this long to downgrade

@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: smartdrive-ai
+    restart: unless-stopped
+    env_file:
+      - ./ai-service/.env
+    ports:
+      - "${AI_SERVER_PORT:-8001}:8001"
+    devices:
+      - /dev/video0:/dev/video0  # Webcam passthrough (Linux)
+    volumes:
+      - ./ai-service:/app
+    command: python -m src.main
