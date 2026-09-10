@@ -1,152 +1,207 @@
 # SmartDrive Guardian — Driver Alertness Monitoring System
 
-SmartDrive Guardian is a real-time driver drowsiness monitoring system that utilizes computer vision to track eye aspect ratio (EAR), mouth aspect ratio (MAR), and percentage of eye closure (PERCLOS) to detect drowsiness and microsleep events in real time.
+SmartDrive Guardian is a real-time driver drowsiness monitoring system that utilizes computer vision to track Eye Aspect Ratio (EAR), Mouth Aspect Ratio (MAR), and Percentage of Eye Closure (PERCLOS) to detect drowsiness and microsleep events, process them through a backend Risk Engine, and stream live alerts, metrics, and safety events to both the Driver Dashboard and the Owner Dashboard.
 
 ---
 
-## 🏛️ Phase 3 Architecture Overview
+## 🏛️ System Architecture
 
-The system streams detection telemetry over a dual WebSocket pipeline across two machines (or on a single machine for development):
-
-```
-Laptop 1 (AI Computer)
+```text
+[Laptop 1: AI Service]
   Webcam → MediaPipe FaceLandmarker → EAR / MAR / PERCLOS
   → Drowsiness Classifier (NORMAL / DROWSY / MICROSLEEP)
   → AI WebSocket Server (ws://0.0.0.0:8001/ws/ai)
            │
-           ▼  (WebSocket LAN JSON Stream)
-Laptop 2 (Application Computer)
-  FastAPI Backend (AI Client + Connection Manager)
-  → Backend WebSocket Gateway (ws://0.0.0.0:8000/ws/drowsiness)
-           │
-           ▼  (WebSocket Forwarding)
-  React Driver Dashboard (http://localhost:5173)
+           ▼  (WebSocket LAN Stream)
+[Laptop 2: Application Computer]
+  FastAPI Backend (AI Client)
+  → Risk Engine (SafetyStateMachine: NORMAL→LOW, DROWSY→MEDIUM, MICROSLEEP→HIGH)
+  → Safety Events Persistence (State-transition logging to SQLite)
+  → Backend WebSocket Gateway:
+      ├─ ws://0.0.0.0:8000/ws/drowsiness  →  Driver Dashboard (Port 5173)
+      └─ ws://0.0.0.0:8000/ws/owner/default → Owner Dashboard (Port 5174)
 ```
 
 ---
 
 ## 🔌 Network Ports & Endpoints
 
-| Component | Host / Port | WebSocket Endpoint | Description |
+| Component | Port | Endpoint / URL | Purpose |
 |---|---|---|---|
-| **AI Service** (Laptop 1) | `0.0.0.0:8001` | `ws://<laptop1-ip>:8001/ws/ai` | Streams live drowsiness telemetry frames |
-| **Backend API** (Laptop 2) | `0.0.0.0:8000` | `ws://<laptop2-ip>:8000/ws/drowsiness` | Ingests AI stream & broadcasts to clients |
-| **Driver Dashboard** | `localhost:5173` | `http://localhost:5173` | Real-time React driver UI |
+| **AI Service** (Laptop 1) | `8001` | `ws://<laptop1-ip>:8001/ws/ai` | Streams detection telemetry |
+| **Backend API** (Laptop 2) | `8000` | `ws://<laptop2-ip>:8000/ws/drowsiness` | Driver WebSocket Gateway |
+| **Backend API** (Laptop 2) | `8000` | `ws://<laptop2-ip>:8000/ws/owner/{id}` | Owner WebSocket Gateway |
+| **Backend REST API** | `8000` | `http://<laptop2-ip>:8000/api/v1/safety/events` | Safety events query API |
+| **Driver Dashboard** | `5173` | `http://localhost:5173` | Real-time Driver UI |
+| **Owner Dashboard** | `5174` | `http://localhost:5174` | Executive / Fleet Safety UI |
 
 ---
 
-## 📦 Telemetry JSON Format
+## 🧠 Risk Engine & State Transitions
 
-Each frame transmits the following JSON payload:
+The Risk Engine (`SafetyStateMachine`) interprets the AI states and manages state transitions:
+
+| AI State | Risk Level | Alert Message | Action / DB Event |
+|---|---|---|---|
+| `NORMAL` | `LOW` | *Driver Alert* | Normal monitoring; no alarm |
+| `DROWSY` | `MEDIUM` | *Driver Attention Required* | Logs 1 `DROWSY` SafetyEvent; warning audio beep |
+| `MICROSLEEP` | `HIGH` | *IMMEDIATE ATTENTION REQUIRED* | Logs 1 `MICROSLEEP` SafetyEvent; critical audio alarm |
+
+> **Duplicate Prevention**: Events are only recorded upon state transitions (e.g. `NORMAL -> DROWSY`), preventing database and frontend alert spam during sustained states.
+
+---
+
+## 📦 Enriched Telemetry JSON Format
 
 ```json
 {
-  "type": "drowsiness",
+  "type": "drowsiness_update",
   "timestamp": "2026-09-10T22:30:00.123456+00:00",
-  "state": "NORMAL",
-  "ear": 0.285,
-  "eye_closed": false,
-  "closed_duration": 0.0,
-  "perclos": 2.1,
-  "mar": 0.280,
+  "state": "DROWSY",
+  "risk_level": "MEDIUM",
+  "alert_message": "Driver Attention Required",
+  "state_changed": true,
+  "ear": 0.172,
+  "eye_closed": true,
+  "closed_duration": 1.82,
+  "perclos": 14.5,
+  "mar": 0.420,
   "yawning": false,
-  "alert_message": null
+  "recent_events": [
+    {
+      "id": "a1b2c3d4",
+      "timestamp": "2026-09-10T22:30:00.123456+00:00",
+      "state": "DROWSY",
+      "risk_level": "MEDIUM",
+      "description": "Driver Attention Required"
+    }
+  ]
 }
 ```
 
-### Possible States
-- `NORMAL` — Eyes open and driver alert (Green status)
-- `DROWSY` — Eyes closed > 1.5s or yawning (Orange/Yellow warning)
-- `MICROSLEEP` — Eyes closed > 3.0s (Strong Red alert + audible alarm)
+---
+
+## 🚀 Installation & Prerequisites
+
+### Required Environment
+- **Python**: 3.10 to 3.13
+- **Node.js**: v18+ & npm
+
+### 1. Install AI Service Requirements
+```powershell
+cd ai-service
+pip install -r requirements.txt
+```
+
+### 2. Install Backend Requirements
+```powershell
+cd backend
+python -m venv venv
+.\venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 3. Install Frontend Dependencies
+```powershell
+# Driver Dashboard
+cd frontend/driver-dashboard
+npm install
+
+# Owner Dashboard
+cd ../owner-dashboard
+npm install
+```
 
 ---
 
-## 🚀 How to Run
+## 🏃 How to Run
 
 ### Option A: Single Laptop (Development Mode)
 
-All 3 components run on the same computer using `localhost` / `127.0.0.1`.
-
-#### Step 1: Start the Backend (Terminal 1)
-```bash
+#### Terminal 1 — Backend
+```powershell
 cd backend
 .\venv\Scripts\activate
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
-> Backend runs at `http://localhost:8000`.
 
-#### Step 2: Start the AI Service (Terminal 2)
-```bash
+#### Terminal 2 — AI Service
+```powershell
 cd ai-service
-python src/main.py
+python -m src.main
 ```
-> Opens webcam, runs MediaPipe, and starts WebSocket server at `ws://0.0.0.0:8001/ws/ai`.
 
-#### Step 3: Start the React Driver Dashboard (Terminal 3)
-```bash
+#### Terminal 3 — React Driver Dashboard (Port 5173)
+```powershell
 cd frontend/driver-dashboard
 npm run dev
 ```
-> Open browser at: **`http://localhost:5173`**
+
+#### Terminal 4 — React Owner Dashboard (Port 5174)
+```powershell
+cd frontend/owner-dashboard
+npm run dev
+```
+
+- **Driver Dashboard**: `http://localhost:5173`
+- **Owner Dashboard**: `http://localhost:5174`
 
 ---
 
 ### Option B: Two Laptops (LAN Setup)
 
-#### Step 1: Find Laptop 1's IP address
-On Laptop 1, open command prompt and run:
-```bash
-ipconfig
-```
-> Example: `192.168.1.105`
-
-#### Step 2: Configure Laptop 2 Backend
-On Laptop 2, open `backend/.env` and set `AI_SERVER_HOST`:
-```env
-AI_SERVER_HOST=192.168.1.105
-AI_SERVER_PORT=8001
-```
-
-#### Step 3: Start Services
-- **Laptop 1**: Run `python src/main.py` in `ai-service/`
-- **Laptop 2**: Run FastAPI backend on port 8000 and React Dashboard on port 5173.
-- Open `http://<laptop2-ip>:5173` or `http://localhost:5173` on Laptop 2.
+1. **Laptop 1 (AI Computer with Webcam)**:
+   - Find LAN IP: `ipconfig` (e.g. `192.168.1.105`).
+   - Run: `python -m src.main` in `ai-service/`.
+2. **Laptop 2 (Application Computer)**:
+   - Configure `backend/.env`:
+     ```env
+     AI_SERVER_HOST=192.168.1.105
+     AI_SERVER_PORT=8001
+     ```
+   - Start backend: `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000`
+   - Start driver dashboard on port 5173: `npm run dev` in `frontend/driver-dashboard/`
+   - Start owner dashboard on port 5174: `npm run dev` in `frontend/owner-dashboard/`
+   - Access UI at `http://localhost:5173` and `http://localhost:5174`.
 
 ---
 
 ## 🧪 Automated Testing
 
-### Run Phase 2 AI Module Tests
-```bash
+### 1. Run Phase 2 Module Tests
+```powershell
 cd ai-service
-python tests/test_phase2_modules.py
+python -m tests.test_phase2_modules
 ```
-*Validates MediaPipe loading, EAR/MAR calculation, temporal closure durations, PERCLOS calculation, and drowsiness classifier.*
 
-### Run Phase 3 Networking Tests
-```bash
+### 2. Run Phase 3 Networking Tests
+```powershell
 cd backend
 .\venv\Scripts\python tests/test_phase3_networking.py
 ```
-*Validates AI WS Server startup, Backend AI Client connection, message schema validation, telemetry transmission across state transitions (NORMAL -> DROWSY -> MICROSLEEP -> NORMAL), and clean disconnects.*
+
+### 3. Run Phase 4 Risk Engine Tests
+```powershell
+cd backend
+.\venv\Scripts\python tests/test_phase4_risk_engine.py
+```
 
 ---
 
-## 🖥️ Expected Dashboard Behavior
+## 🖥️ Expected Dashboard Verification Flow
 
-1. **Normal Alert State**:
-   - Hero banner displays **NORMAL** with a sleek green border and emerald glow.
-   - EAR displays ~0.25–0.32, Eye Status shows **OPEN** (Green badge).
-   - Closed duration remains `0.00 s`.
-
-2. **Drowsy State (Eyes closed ~1.5s or yawning)**:
-   - Hero banner changes to **DROWSY** with amber warning glow and alert subtitle.
-   - Eye Status shows **CLOSED** (Red badge), duration displays `~1.50 s+`.
-   - Audio beep triggers on Laptop 1.
-
-3. **Microsleep State (Eyes closed > 3.0s)**:
-   - Hero banner flashes **MICROSLEEP** with a strong red alert and critical instruction.
-   - High-pitch emergency alarm sounds continuously.
-
-4. **Return to Alert State (Eyes opened)**:
-   - Immediately reverts to **NORMAL** with zero lag.
+1. **Normal Driving**:
+   - Eyes open → Card shows **NORMAL** (Green, Risk: **LOW**).
+   - Driver metrics: EAR ~0.25–0.32, Eye Status: **OPEN**, Closed Duration: `0.00 s`.
+   - Owner dashboard: Driver Status **NORMAL**, Risk **LOW**, Vehicle **ONLINE**.
+2. **Drowsiness Trigger (~1.5s eyes closed or yawning)**:
+   - Card transitions to **DROWSY** (Amber, Risk: **MEDIUM**).
+   - "Recent Drowsiness Events" logs `DROWSY` with timestamp on both dashboards.
+   - Audio beep sounds locally on Laptop 1.
+3. **Microsleep Trigger (>3.0s eyes closed)**:
+   - Card flashes **MICROSLEEP** (Red, Risk: **HIGH**).
+   - "Recent Drowsiness Events" logs `MICROSLEEP` with timestamp on both dashboards.
+   - Critical alarm sounds on Laptop 1.
+4. **Recovery**:
+   - Eyes opened → Instantly returns to **NORMAL** (Green, Risk: **LOW**).
+   - Event logged for transition to `NORMAL`.

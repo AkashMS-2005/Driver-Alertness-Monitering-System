@@ -62,8 +62,8 @@ class AIWebSocketClient:
         # Update connection service detection timestamp
         await ai_connection_service.on_detection_received()
 
-        # Forward enriched telemetry to connected driver dashboard clients
-        await manager.broadcast_to_all_drivers(enriched_data)
+        # Forward enriched telemetry to all connected driver and owner dashboard clients
+        await manager.broadcast_to_all(enriched_data)
 
     async def _connect_and_listen(self):
         """Single connection session to the AI WebSocket server."""

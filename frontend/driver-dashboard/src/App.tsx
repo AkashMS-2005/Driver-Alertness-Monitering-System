@@ -290,6 +290,29 @@ export function App() {
         </div>
 
         <div className="status-badges">
+          <a
+            href="http://localhost:5174"
+            target="_blank"
+            rel="noreferrer"
+            className="nav-link-btn"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: '0.8rem',
+              fontWeight: 600,
+              textDecoration: 'none',
+              background: 'rgba(99, 102, 241, 0.15)',
+              color: '#a5b4fc',
+              border: '1px solid rgba(99, 102, 241, 0.35)',
+              transition: 'all 0.2s ease',
+            }}
+          >
+            <span>Owner Dashboard (Port 5174) ↗</span>
+          </a>
+
           <div className="badge">
             <span className={`status-dot ${wsConnected ? 'dot-connected' : 'dot-disconnected'}`} />
             <span>{wsConnected ? 'CONNECTED' : 'DISCONNECTED'}</span>
