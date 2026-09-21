@@ -16,7 +16,16 @@ def _parse_backoff() -> list[int]:
 
 
 def _parse_cors() -> list[str]:
-    raw = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:5174")
+    raw = os.getenv(
+        "CORS_ORIGINS",
+        # Vite dev server auto-increments the port when the default is taken.
+        # All common Vite ports (5173–5180) are allowed in development.
+        # In production, set CORS_ORIGINS in backend/.env to your actual domain.
+        "http://localhost:5173,http://localhost:5174,http://localhost:5175,"
+        "http://localhost:5176,http://localhost:5177,http://localhost:5178,"
+        "http://127.0.0.1:5173,http://127.0.0.1:5174,http://127.0.0.1:5175,"
+        "http://127.0.0.1:5176,http://127.0.0.1:5177,http://127.0.0.1:5178"
+    )
     return [x.strip() for x in raw.split(",")]
 
 

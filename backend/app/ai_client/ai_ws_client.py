@@ -41,12 +41,22 @@ class AIWebSocketClient:
         return True
 
     async def _handle_message(self, message: str):
-        """Parse, validate, enrich with risk engine, and broadcast telemetry."""
+        """Parse, validate, enrich with risk engine, and broadcast telemetry.
+
+        frame_b64 (base64 JPEG from AI camera) is extracted before the risk engine
+        so the risk engine only sees drowsiness fields it understands. After enrichment
+        the frame is re-attached to the broadcast payload so the dashboard can display
+        the live camera feed. The frame is NOT stored in self.latest_drowsiness to avoid
+        unbounded memory usage in the cache.
+        """
         try:
             data = json.loads(message)
         except json.JSONDecodeError:
             logger.warning(f"Invalid JSON received from AI service: {message[:100]}")
             return
+
+        # Extract live camera frame before validation/processing (present every N frames)
+        frame_b64: str = data.pop("frame_b64", "")
 
         if not self._validate_drowsiness_payload(data):
             logger.debug(f"Non-drowsiness or invalid payload ignored: {data}")
@@ -56,14 +66,19 @@ class AIWebSocketClient:
         from app.risk_engine.state_machine import risk_engine
         enriched_data = await risk_engine.process_ai_event(data)
 
-        # Cache latest result in memory
+        # Cache latest drowsiness result (without frame to avoid memory growth)
         self.latest_drowsiness = enriched_data
 
         # Update connection service detection timestamp
         await ai_connection_service.on_detection_received()
 
-        # Forward enriched telemetry to all connected driver and owner dashboard clients
-        await manager.broadcast_to_all(enriched_data)
+        # Build broadcast payload: enriched drowsiness data + frame if available
+        broadcast_data = dict(enriched_data)
+        if frame_b64:
+            broadcast_data["frame_b64"] = frame_b64
+
+        # Forward to all connected dashboard clients
+        await manager.broadcast_to_all(broadcast_data)
 
     async def _connect_and_listen(self):
         """Single connection session to the AI WebSocket server."""

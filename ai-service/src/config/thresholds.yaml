@@ -18,4 +18,15 @@ drowsiness:
 
 mouth_state:
   # Mouth Aspect Ratio (MAR) — yawn detection
-  mar_threshold: 0.60          # Above this = yawning
+  # Old behaviour: yawning = MAR > mar_threshold (single frame, caused false positives from talking)
+  # New behaviour: temporal state machine — mouth must remain above mar_threshold for
+  # yawn_min_duration seconds continuously before a yawn is confirmed.
+  mar_threshold: 0.80          # Above this = candidate for yawning
+  yawn_min_duration: 1.0       # seconds mouth must stay above threshold to confirm a yawn
+  yawn_reset_duration: 0.3     # seconds mouth must stay closed to end the current yawn episode
+  #
+  # Tuning guidance:
+  #   If normal talking still triggers yawning, increase yawn_min_duration (try 1.2 – 1.5).
+  #   If genuine yawns are missed, decrease yawn_min_duration (try 0.8 – 0.9).
+  #   If the yawn "flickers" at end, increase yawn_reset_duration (try 0.5).
+  #   If a new yawn is counted too quickly after a previous one, increase yawn_reset_duration.
