@@ -4,13 +4,33 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=False,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True,
-)
+
+def _make_engine():
+    """Create an async engine with settings appropriate for the configured database.
+
+    SQLite does not support pool_size/max_overflow — use NullPool instead.
+    PostgreSQL uses the default pool with explicit sizing.
+    """
+    url = settings.DATABASE_URL
+    if url.startswith("sqlite"):
+        from sqlalchemy.pool import StaticPool
+        return create_async_engine(
+            url,
+            echo=False,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    else:
+        return create_async_engine(
+            url,
+            echo=False,
+            pool_size=10,
+            max_overflow=20,
+            pool_pre_ping=True,
+        )
+
+
+engine = _make_engine()
 
 async_session = async_sessionmaker(
     engine,

@@ -1,5 +1,14 @@
-"""Emergency event routes."""
+"""Emergency event routes — recording and triggering emergency assistance.
 
+Endpoints:
+  POST /api/v1/emergency/trigger       — unified emergency trigger (preferred for frontend use)
+  POST /api/v1/emergency/              — low-level emergency event creation
+  PUT  /api/v1/emergency/{id}/resolve  — resolve an emergency
+  GET  /api/v1/emergency/vehicle/{id}  — list emergencies for a vehicle
+"""
+
+import math
+import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,9 +16,64 @@ from sqlalchemy import select
 from pydantic import BaseModel
 from app.db.database import get_db
 from app.models.emergency_event import EmergencyEvent
+from app.models.highway_assistance import HighwayAssistance
+from app.models.location import Location
+from app.models.vehicle import Vehicle
+from app.models.owner import Owner
+from app.models.trip import Trip
 
+logger = logging.getLogger("smartdrive")
 router = APIRouter()
 
+# ---------------------------------------------------------------------------
+# Static mock toll plaza database (real GPS coordinates of Indian NH toll plazas)
+# NOTE: [DEV] This is static reference data. In production, replace with a live
+# toll/highway assistance API (e.g., NHAI, HERE Maps, or Google Places API).
+# ---------------------------------------------------------------------------
+TOLL_PLAZAS = [
+    {"name": "Tumkur Toll Plaza",      "lat": 13.3409, "lon": 77.1019, "highway": "NH-48"},
+    {"name": "Nelamangala Toll Plaza",  "lat": 13.0966, "lon": 77.3922, "highway": "NH-48"},
+    {"name": "Nidaghatta Toll Plaza",   "lat": 12.8520, "lon": 76.6200, "highway": "NH-275"},
+    {"name": "Mandya Toll Plaza",       "lat": 12.5218, "lon": 76.8951, "highway": "NH-275"},
+    {"name": "Kengeri Toll Plaza",      "lat": 12.9037, "lon": 77.4863, "highway": "NICE Road"},
+    {"name": "Hoskote Toll Plaza",      "lat": 13.0679, "lon": 77.7983, "highway": "NH-75"},
+    {"name": "Bommasandra Toll Plaza",  "lat": 12.8130, "lon": 77.6940, "highway": "NICE Road"},
+    {"name": "Ramanagara Toll Plaza",   "lat": 12.7177, "lon": 77.2857, "highway": "NH-275"},
+    {"name": "Channapatna Toll Plaza",  "lat": 12.6518, "lon": 77.2057, "highway": "NH-275"},
+    {"name": "Bidadi Toll Plaza",       "lat": 12.7986, "lon": 77.3827, "highway": "NH-275"},
+    {"name": "Yelahanka Toll Plaza",    "lat": 13.1047, "lon": 77.5963, "highway": "NH-44"},
+    {"name": "Devanahalli Toll Plaza",  "lat": 13.2329, "lon": 77.7148, "highway": "NH-44"},
+    {"name": "Attibele Toll Plaza",     "lat": 12.7699, "lon": 77.7756, "highway": "NH-44"},
+    {"name": "Electronic City Toll",    "lat": 12.8456, "lon": 77.6598, "highway": "Hosur Road"},
+    {"name": "Mysuru Road Toll Plaza",  "lat": 12.9305, "lon": 77.4568, "highway": "NH-275"},
+]
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculate the great-circle distance between two points in kilometres."""
+    R = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _find_nearest_toll(lat: float, lon: float) -> dict:
+    """Return the nearest toll plaza from the static database."""
+    best = None
+    best_dist = float("inf")
+    for plaza in TOLL_PLAZAS:
+        d = _haversine_km(lat, lon, plaza["lat"], plaza["lon"])
+        if d < best_dist:
+            best_dist = d
+            best = plaza
+    return {"toll": best, "distance_km": round(best_dist, 2)} if best else None
+
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas
+# ---------------------------------------------------------------------------
 
 class EmergencyCreate(BaseModel):
     trip_id: str
@@ -34,11 +98,231 @@ class EmergencyResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class EmergencyTriggerRequest(BaseModel):
+    """Unified emergency trigger payload for the frontend button."""
+    vehicle_id: str | None = None          # If None, uses the first registered vehicle
+    reason: str = "DRIVER_UNRESPONSIVE"    # Free-text reason shown in notification
+    driver_status: str = "UNKNOWN"         # NORMAL / DROWSY / MICROSLEEP
+    drowsiness_level: float = 0.0          # PERCLOS % at time of emergency
+
+
+class EmergencyTriggerResponse(BaseModel):
+    """Full result returned to the frontend after emergency is triggered."""
+    emergency_id: str
+    vehicle_location: dict
+    nearest_toll: dict | None
+    owner_notified: bool
+    owner_notification_method: str
+    status: str
+    message: str
+    note: str
+    triggered_at: str
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/trigger", response_model=EmergencyTriggerResponse, status_code=201)
+async def trigger_emergency(
+    payload: EmergencyTriggerRequest, db: AsyncSession = Depends(get_db)
+):
+    """Unified emergency trigger — called when the frontend 🚨 EMERGENCY button is pressed.
+
+    Workflow:
+      1. Resolve the vehicle (use payload.vehicle_id or first registered)
+      2. Get latest GPS location from DB
+      3. Find nearest toll plaza (Haversine distance, static database)
+      4. Create EmergencyEvent record
+      5. Create HighwayAssistance record
+      6. Notify owner via WebSocket (and log for future SMS/email integration)
+      7. Return result to frontend
+
+    NOTE: [DEV] SMS and Email notifications require external provider configuration.
+    See NOTIFICATION_SERVICE_NOTE below for setup instructions.
+    """
+    # 1. Resolve vehicle
+    if payload.vehicle_id:
+        veh_res = await db.execute(select(Vehicle).where(Vehicle.id == payload.vehicle_id))
+        vehicle = veh_res.scalar_one_or_none()
+        if not vehicle:
+            raise HTTPException(status_code=404, detail="Vehicle not found")
+    else:
+        veh_res = await db.execute(select(Vehicle).limit(1))
+        vehicle = veh_res.scalar_one_or_none()
+        if not vehicle:
+            raise HTTPException(status_code=404, detail="No vehicle registered in the system")
+
+    # Get owner
+    owner_res = await db.execute(select(Owner).where(Owner.id == vehicle.owner_id))
+    owner = owner_res.scalar_one_or_none()
+
+    # 2. Latest GPS location
+    loc_res = await db.execute(
+        select(Location)
+        .where(Location.vehicle_id == vehicle.id)
+        .order_by(Location.timestamp.desc())
+        .limit(1)
+    )
+    latest_loc = loc_res.scalar_one_or_none()
+
+    # Use DB location or default Bengaluru placeholder
+    if latest_loc:
+        veh_lat = latest_loc.latitude
+        veh_lon = latest_loc.longitude
+        gps_label = "GPS"
+    else:
+        # Default placeholder — Bengaluru city center
+        veh_lat = 12.9716
+        veh_lon = 77.5946
+        gps_label = "PLACEHOLDER — GPS not connected"
+
+    # 3. Find nearest toll plaza
+    toll_result = _find_nearest_toll(veh_lat, veh_lon)
+
+    # 4. Get or find active trip
+    trip_res = await db.execute(
+        select(Trip)
+        .where(Trip.vehicle_id == vehicle.id, Trip.status == "ACTIVE")
+        .limit(1)
+    )
+    active_trip = trip_res.scalar_one_or_none()
+
+    if not active_trip:
+        # Create a minimal trip record for the emergency event
+        active_trip = Trip(
+            vehicle_id=vehicle.id,
+            status="EMERGENCY_STOPPED",
+            start_latitude=veh_lat,
+            start_longitude=veh_lon,
+        )
+        db.add(active_trip)
+        await db.flush()
+        await db.refresh(active_trip)
+
+    # 5. Create EmergencyEvent
+    description = (
+        f"Emergency triggered by dashboard. Reason: {payload.reason}. "
+        f"Driver status: {payload.driver_status}. "
+        f"Drowsiness level: {payload.drowsiness_level:.1f}%. "
+        f"Location: {veh_lat:.4f}, {veh_lon:.4f} ({gps_label})."
+    )
+    emergency = EmergencyEvent(
+        trip_id=active_trip.id,
+        vehicle_id=vehicle.id,
+        emergency_type="DRIVER_EMERGENCY",
+        status="ASSISTANCE_REQUESTED",
+        description=description,
+        latitude=veh_lat,
+        longitude=veh_lon,
+        detected_at=datetime.now(timezone.utc),
+    )
+    db.add(emergency)
+    await db.flush()
+    await db.refresh(emergency)
+
+    # 6. Create HighwayAssistance record
+    toll_name = toll_result["toll"]["name"] if toll_result else "Unknown"
+    toll_dist = toll_result["distance_km"] if toll_result else 0.0
+
+    assistance_desc = (
+        f"Emergency assistance requested. "
+        f"Nearest toll: {toll_name} ({toll_dist:.1f} km away)."
+    )
+    assistance = HighwayAssistance(
+        trip_id=active_trip.id,
+        vehicle_id=vehicle.id,
+        assistance_type="EMERGENCY_ASSISTANCE",
+        status="REQUESTED",
+        description=assistance_desc,
+        latitude=veh_lat,
+        longitude=veh_lon,
+    )
+    db.add(assistance)
+    await db.flush()
+
+    # 7. Notify owner via WebSocket + log
+    owner_notified = False
+    notification_method = "WEBSOCKET"
+    try:
+        from app.websocket.connection_manager import manager
+
+        notification_payload = {
+            "event_type": "EMERGENCY_ALERT",
+            "emergency_id": emergency.id,
+            "vehicle": f"{vehicle.make} {vehicle.model} ({vehicle.plate_number})",
+            "vehicle_id": vehicle.id,
+            "location": {"latitude": veh_lat, "longitude": veh_lon, "source": gps_label},
+            "driver_status": payload.driver_status,
+            "drowsiness_level": payload.drowsiness_level,
+            "nearest_toll": toll_result["toll"] if toll_result else None,
+            "distance_to_toll_km": toll_dist,
+            "reason": payload.reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        # Broadcast to all connected dashboards
+        await manager.broadcast_to_all(notification_payload)
+        owner_notified = True
+
+        logger.warning(
+            f"EMERGENCY TRIGGERED — Vehicle: {vehicle.plate_number} | "
+            f"Location: {veh_lat:.4f},{veh_lon:.4f} | "
+            f"Nearest toll: {toll_name} ({toll_dist:.1f}km) | "
+            f"Driver: {payload.driver_status} | "
+            f"Owner: {owner.name if owner else 'N/A'} ({owner.email if owner else 'N/A'}) | "
+            f"[DEV] SMS not configured — WebSocket notification sent."
+        )
+
+    except Exception as exc:
+        logger.error(f"Failed to send owner notification: {exc}")
+
+    # NOTE: NOTIFICATION_SERVICE_NOTE
+    # To enable SMS notifications, configure the following in backend/.env:
+    #   TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    #   TWILIO_AUTH_TOKEN=your_auth_token
+    #   TWILIO_FROM_NUMBER=+1xxxxxxxxxx
+    # Then call: await sms_service.send_emergency_sms(owner.phone, notification_text)
+    # The abstraction is in app/services/notification_service.py
+
+    return EmergencyTriggerResponse(
+        emergency_id=emergency.id,
+        vehicle_location={
+            "latitude": veh_lat,
+            "longitude": veh_lon,
+            "source": gps_label,
+        },
+        nearest_toll={
+            "name": toll_result["toll"]["name"] if toll_result else None,
+            "highway": toll_result["toll"]["highway"] if toll_result else None,
+            "latitude": toll_result["toll"]["lat"] if toll_result else None,
+            "longitude": toll_result["toll"]["lon"] if toll_result else None,
+            "distance_km": toll_dist,
+        } if toll_result else None,
+        owner_notified=owner_notified,
+        owner_notification_method=notification_method,
+        status="ASSISTANCE_REQUESTED",
+        message=(
+            f"Emergency registered. Nearest assistance: {toll_name} ({toll_dist:.1f} km). "
+            f"Owner notified via WebSocket."
+        ),
+        note=(
+            "[DEV] Toll gate data is static reference data (real GPS coordinates of Indian NH "
+            "toll plazas). No external agency has been contacted. "
+            "SMS notifications require Twilio credentials in backend/.env."
+        ),
+        triggered_at=emergency.detected_at.isoformat(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Low-level CRUD endpoints (kept for API completeness)
+# ---------------------------------------------------------------------------
+
 @router.post("/", response_model=EmergencyResponse, status_code=status.HTTP_201_CREATED)
 async def create_emergency(
     payload: EmergencyCreate, db: AsyncSession = Depends(get_db)
 ):
-    """Record a new emergency event."""
+    """Record a new emergency event (low-level — prefer /trigger for dashboard use)."""
     event = EmergencyEvent(
         trip_id=payload.trip_id,
         vehicle_id=payload.vehicle_id,

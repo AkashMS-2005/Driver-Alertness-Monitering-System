@@ -9,6 +9,8 @@ from app.api.v1 import (
     assistance_routes,
     emergency_routes,
     ai_connection_routes,
+    location_routes,
+    dashboard_routes,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -24,3 +26,5 @@ api_router.include_router(
     emergency_routes.router, prefix="/emergency", tags=["Emergency"]
 )
 api_router.include_router(ai_connection_routes.router, prefix="/ai", tags=["AI Connection"])
+api_router.include_router(location_routes.router, prefix="/locations", tags=["Location"])
+api_router.include_router(dashboard_routes.router, prefix="/dashboard", tags=["Dashboard"])
