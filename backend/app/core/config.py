@@ -58,6 +58,18 @@ class Settings:
     SECRET_KEY: str = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
     CORS_ORIGINS: list[str] = _parse_cors()
 
+    # Emergency Engine — configurable thresholds
+    # EMERGENCY_COOLDOWN_SECONDS: wait time before a new emergency can fire after
+    #   the previous one was CANCELLED or RESOLVED.
+    EMERGENCY_COOLDOWN_SECONDS: int = int(
+        os.getenv("EMERGENCY_COOLDOWN_SECONDS", "60")
+    )
+    # RECOVERY_CONFIRMATION_SECONDS: continuous NORMAL + drowsiness <= 50% window
+    #   required before the emergency transitions to DRIVER_RECOVERED.
+    RECOVERY_CONFIRMATION_SECONDS: int = int(
+        os.getenv("RECOVERY_CONFIRMATION_SECONDS", "10")
+    )
+
     @property
     def ai_ws_url(self) -> str:
         """Full WebSocket URL to connect to the AI service on Laptop 1."""

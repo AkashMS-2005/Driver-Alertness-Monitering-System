@@ -1,10 +1,14 @@
 """Emergency event routes — recording and triggering emergency assistance.
 
 Endpoints:
-  POST /api/v1/emergency/trigger       — unified emergency trigger (preferred for frontend use)
-  POST /api/v1/emergency/              — low-level emergency event creation
-  PUT  /api/v1/emergency/{id}/resolve  — resolve an emergency
-  GET  /api/v1/emergency/vehicle/{id}  — list emergencies for a vehicle
+  POST /api/v1/emergency/trigger              — manual emergency trigger (frontend button)
+  POST /api/v1/emergency/{id}/respond         — assistance response [NEW]
+  POST /api/v1/emergency/{id}/cancel          — driver cancel after recovery [NEW]
+  GET  /api/v1/emergency/active/{vehicle_id}  — get active emergency [NEW]
+  GET  /api/v1/emergency/history/{vehicle_id} — full history [NEW]
+  POST /api/v1/emergency/                     — low-level emergency event creation
+  PUT  /api/v1/emergency/{id}/resolve         — resolve an emergency
+  GET  /api/v1/emergency/vehicle/{id}         — list emergencies for a vehicle (legacy)
 """
 
 import math
@@ -21,6 +25,7 @@ from app.models.location import Location
 from app.models.vehicle import Vehicle
 from app.models.owner import Owner
 from app.models.trip import Trip
+from app.services.emergency_service import emergency_service
 
 logger = logging.getLogger("smartdrive")
 router = APIRouter()
@@ -90,10 +95,19 @@ class EmergencyResponse(BaseModel):
     vehicle_id: str
     emergency_type: str
     status: str
+    trigger_source: str = "MANUAL"
     description: str | None = None
     latitude: float | None = None
     longitude: float | None = None
+    place_name: str | None = None
+    microsleep_count: int | None = None
+    drowsiness_percentage: float | None = None
     detected_at: datetime
+    triggered_at: datetime | None = None
+    response_message: str | None = None
+    responded_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    cancelled_reason: str | None = None
     resolved_at: datetime | None = None
     model_config = {"from_attributes": True}
 
@@ -119,8 +133,128 @@ class EmergencyTriggerResponse(BaseModel):
     triggered_at: str
 
 
+class AssistanceRespondRequest(BaseModel):
+    """Payload for assistance response endpoint."""
+    message: str = "Highway assistance team is on the way."
+
+
+class CancelEmergencyRequest(BaseModel):
+    """Payload for driver cancel endpoint."""
+    reason: str = "Driver recovered and cancelled emergency."
+
+
+class ActiveEmergencyResponse(BaseModel):
+    """Active emergency payload for the owner dashboard."""
+    emergency_id: str
+    status: str
+    vehicle_id: str
+    trip_id: str
+    microsleep_count: int
+    drowsiness_percentage: float
+    latitude: float | None
+    longitude: float | None
+    place_name: str | None
+    gps_source: str
+    assistance_name: str | None
+    assistance_distance_km: float | None
+    triggered_at: str | None
+    response_message: str | None
+    responded_at: str | None
+    cancelled_at: str | None
+    cancelled_reason: str | None
+
+
 # ---------------------------------------------------------------------------
-# Endpoints
+# NEW Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/active/{vehicle_id}")
+async def get_active_emergency(
+    vehicle_id: str, db: AsyncSession = Depends(get_db)
+):
+    """Return the currently active emergency for a vehicle, or null."""
+    payload = await emergency_service.build_active_emergency_payload(vehicle_id, db)
+    if not payload:
+        return {"active": False, "emergency": None}
+    return {"active": True, "emergency": payload}
+
+
+@router.get("/history/{vehicle_id}", response_model=list[EmergencyResponse])
+async def get_emergency_history(
+    vehicle_id: str, limit: int = 50, db: AsyncSession = Depends(get_db)
+):
+    """Return emergency history for a vehicle, newest first."""
+    events = await emergency_service.get_emergency_history(vehicle_id, db, limit=limit)
+    return events
+
+
+@router.post("/{emergency_id}/respond")
+async def respond_to_emergency(
+    emergency_id: str,
+    payload: AssistanceRespondRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """[DEV] Simulate highway assistance response.
+
+    In production this would be called by the toll operator's application.
+    This endpoint validates the emergency, records the response, and
+    broadcasts ASSISTANCE_RESPONSE to all connected owner dashboards.
+    """
+    try:
+        emergency = await emergency_service.respond_to_emergency(
+            emergency_id=emergency_id,
+            message=payload.message,
+            db=db,
+        )
+        return {
+            "success": True,
+            "emergency_id": emergency.id,
+            "status": emergency.status,
+            "message": payload.message,
+            "responded_at": emergency.responded_at.isoformat() if emergency.responded_at else None,
+            "note": "[DEV] This is a development/mock response endpoint. No real toll operator was contacted.",
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Error responding to emergency {emergency_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/{emergency_id}/cancel")
+async def cancel_emergency(
+    emergency_id: str,
+    payload: CancelEmergencyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancel an emergency after driver recovery confirmation.
+
+    Only allowed when:
+    - Emergency status is DRIVER_RECOVERED
+    - Assistance has NOT yet responded
+    """
+    try:
+        emergency = await emergency_service.cancel_emergency(
+            emergency_id=emergency_id,
+            reason=payload.reason,
+            db=db,
+        )
+        return {
+            "success": True,
+            "emergency_id": emergency.id,
+            "status": emergency.status,
+            "cancelled_at": emergency.cancelled_at.isoformat() if emergency.cancelled_at else None,
+            "reason": emergency.cancelled_reason,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Error cancelling emergency {emergency_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ---------------------------------------------------------------------------
+# Existing Endpoints (unchanged)
 # ---------------------------------------------------------------------------
 
 @router.post("/trigger", response_model=EmergencyTriggerResponse, status_code=201)
@@ -129,11 +263,13 @@ async def trigger_emergency(
 ):
     """Unified emergency trigger — called when the frontend 🚨 EMERGENCY button is pressed.
 
+    Trigger source: MANUAL (distinguishes from AUTO_DROWSINESS triggers).
+
     Workflow:
       1. Resolve the vehicle (use payload.vehicle_id or first registered)
       2. Get latest GPS location from DB
       3. Find nearest toll plaza (Haversine distance, static database)
-      4. Create EmergencyEvent record
+      4. Create EmergencyEvent record (trigger_source=MANUAL)
       5. Create HighwayAssistance record
       6. Notify owner via WebSocket (and log for future SMS/email integration)
       7. Return result to frontend
@@ -200,22 +336,27 @@ async def trigger_emergency(
         await db.flush()
         await db.refresh(active_trip)
 
-    # 5. Create EmergencyEvent
+    # 5. Create EmergencyEvent (trigger_source=MANUAL)
     description = (
         f"Emergency triggered by dashboard. Reason: {payload.reason}. "
         f"Driver status: {payload.driver_status}. "
         f"Drowsiness level: {payload.drowsiness_level:.1f}%. "
         f"Location: {veh_lat:.4f}, {veh_lon:.4f} ({gps_label})."
     )
+    now = datetime.now(timezone.utc)
     emergency = EmergencyEvent(
         trip_id=active_trip.id,
         vehicle_id=vehicle.id,
+        owner_id=vehicle.owner_id,
         emergency_type="DRIVER_EMERGENCY",
-        status="ASSISTANCE_REQUESTED",
+        status="ACTIVE",
+        trigger_source="MANUAL",
         description=description,
         latitude=veh_lat,
         longitude=veh_lon,
-        detected_at=datetime.now(timezone.utc),
+        drowsiness_percentage=payload.drowsiness_level,
+        detected_at=now,
+        triggered_at=now,
     )
     db.add(emergency)
     await db.flush()
@@ -224,6 +365,10 @@ async def trigger_emergency(
     # 6. Create HighwayAssistance record
     toll_name = toll_result["toll"]["name"] if toll_result else "Unknown"
     toll_dist = toll_result["distance_km"] if toll_result else 0.0
+    full_toll_name = (
+        f"{toll_result['toll']['name']} ({toll_result['toll']['highway']})"
+        if toll_result else "Demo Highway Assistance"
+    )
 
     assistance_desc = (
         f"Emergency assistance requested. "
@@ -232,11 +377,14 @@ async def trigger_emergency(
     assistance = HighwayAssistance(
         trip_id=active_trip.id,
         vehicle_id=vehicle.id,
+        emergency_id=emergency.id,
         assistance_type="EMERGENCY_ASSISTANCE",
+        assistance_name=full_toll_name,
         status="REQUESTED",
         description=assistance_desc,
         latitude=veh_lat,
         longitude=veh_lon,
+        distance_km=toll_dist,
     )
     db.add(assistance)
     await db.flush()
@@ -248,24 +396,35 @@ async def trigger_emergency(
         from app.websocket.connection_manager import manager
 
         notification_payload = {
-            "event_type": "EMERGENCY_ALERT",
+            "type": "EMERGENCY_TRIGGERED",
+            "event_type": "EMERGENCY_ALERT",  # legacy compat
             "emergency_id": emergency.id,
-            "vehicle": f"{vehicle.make} {vehicle.model} ({vehicle.plate_number})",
+            "status": "ACTIVE",
             "vehicle_id": vehicle.id,
+            "trip_id": active_trip.id,
+            "vehicle": f"{vehicle.make} {vehicle.model} ({vehicle.plate_number})",
             "location": {"latitude": veh_lat, "longitude": veh_lon, "source": gps_label},
+            "latitude": veh_lat,
+            "longitude": veh_lon,
+            "gps_source": gps_label,
             "driver_status": payload.driver_status,
-            "drowsiness_level": payload.drowsiness_level,
+            "drowsiness_percentage": payload.drowsiness_level,
+            "microsleep_count": 0,  # manual trigger — no microsleep count
+            "assistance_name": full_toll_name,
+            "assistance_distance_km": toll_dist,
             "nearest_toll": toll_result["toll"] if toll_result else None,
             "distance_to_toll_km": toll_dist,
             "reason": payload.reason,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trigger_source": "MANUAL",
+            "triggered_at": now.isoformat(),
+            "timestamp": now.isoformat(),
         }
         # Broadcast to all connected dashboards
         await manager.broadcast_to_all(notification_payload)
         owner_notified = True
 
         logger.warning(
-            f"EMERGENCY TRIGGERED — Vehicle: {vehicle.plate_number} | "
+            f"MANUAL EMERGENCY TRIGGERED — Vehicle: {vehicle.plate_number} | "
             f"Location: {veh_lat:.4f},{veh_lon:.4f} | "
             f"Nearest toll: {toll_name} ({toll_dist:.1f}km) | "
             f"Driver: {payload.driver_status} | "
@@ -300,7 +459,7 @@ async def trigger_emergency(
         } if toll_result else None,
         owner_notified=owner_notified,
         owner_notification_method=notification_method,
-        status="ASSISTANCE_REQUESTED",
+        status="ACTIVE",
         message=(
             f"Emergency registered. Nearest assistance: {toll_name} ({toll_dist:.1f} km). "
             f"Owner notified via WebSocket."
@@ -359,7 +518,7 @@ async def resolve_emergency(
 async def list_emergencies_for_vehicle(
     vehicle_id: str, db: AsyncSession = Depends(get_db)
 ):
-    """List emergency events for a vehicle."""
+    """List emergency events for a vehicle (legacy endpoint — use /history/{vehicle_id} instead)."""
     result = await db.execute(
         select(EmergencyEvent)
         .where(EmergencyEvent.vehicle_id == vehicle_id)

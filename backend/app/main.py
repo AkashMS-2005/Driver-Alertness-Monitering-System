@@ -236,6 +236,36 @@ async def lifespan(app: FastAPI):
     await seed_default_data()
 
     # --------------------------------------------------------
+    # Register active vehicle/trip IDs with the Risk Engine
+    # --------------------------------------------------------
+    # This gives the EmergencyEngine real DB IDs so it can
+    # create EmergencyEvent records with correct foreign keys.
+    try:
+        from sqlalchemy import select
+        from app.models.vehicle import Vehicle
+        from app.models.trip import Trip
+        from app.risk_engine.state_machine import update_active_vehicle_trip
+
+        async with async_session() as session:
+            veh_res = await session.execute(select(Vehicle).limit(1))
+            veh = veh_res.scalar_one_or_none()
+            if veh:
+                trip_res = await session.execute(
+                    select(Trip)
+                    .where(Trip.vehicle_id == veh.id, Trip.status == "ACTIVE")
+                    .limit(1)
+                )
+                trip = trip_res.scalar_one_or_none()
+                if trip:
+                    update_active_vehicle_trip(veh.id, trip.id)
+                    logger.info(
+                        f"Risk engine vehicle/trip IDs registered: "
+                        f"vehicle={veh.id[:8]}… trip={trip.id[:8]}…"
+                    )
+    except Exception as exc:
+        logger.warning(f"Could not register vehicle/trip IDs (non-fatal): {exc}")
+
+    # --------------------------------------------------------
     # Register AI connection state
     # --------------------------------------------------------
 

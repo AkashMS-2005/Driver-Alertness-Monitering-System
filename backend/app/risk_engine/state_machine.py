@@ -15,6 +15,18 @@ from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger("smartdrive.risk_engine")
 
+# Cached active vehicle/trip IDs resolved at startup from the database.
+# Updated whenever a new dashboard event provides context.
+_active_vehicle_id: str = "vehicle-1"
+_active_trip_id: str = "trip-active-1"
+
+
+def update_active_vehicle_trip(vehicle_id: str, trip_id: str):
+    """Called by startup seed / dashboard poll to keep vehicle/trip IDs current."""
+    global _active_vehicle_id, _active_trip_id
+    _active_vehicle_id = vehicle_id
+    _active_trip_id = trip_id
+
 STATE_NORMAL = "NORMAL"
 STATE_DROWSY = "DROWSY"
 STATE_MICROSLEEP = "MICROSLEEP"
@@ -133,6 +145,15 @@ class SafetyStateMachine:
                     )
                 )
 
+        # ---------------------------------------------------------------
+        # Emergency Engine — process every frame for microsleep counting
+        # and automatic emergency trigger logic.
+        # ---------------------------------------------------------------
+        drowsiness_pct = round(float(ai_event.get("perclos", 0.0)), 1)
+        asyncio.create_task(
+            self._run_emergency_engine(new_state, drowsiness_pct)
+        )
+
         # Build normalized and enriched telemetry payload for the driver dashboard
         return {
             "type": "drowsiness_update",
@@ -149,6 +170,20 @@ class SafetyStateMachine:
             "yawning": bool(ai_event.get("yawning", False)),
             "recent_events": self.get_recent_events(limit=10),
         }
+
+    async def _run_emergency_engine(self, state: str, drowsiness_pct: float):
+        """Non-blocking delegation to the EmergencyEngine."""
+        try:
+            from app.risk_engine.emergency_engine import emergency_engine
+            await emergency_engine.on_ai_event(
+                state=state,
+                drowsiness_percentage=drowsiness_pct,
+                vehicle_id=_active_vehicle_id,
+                trip_id=_active_trip_id,
+            )
+        except Exception as exc:
+            # Non-fatal — log and proceed so live stream remains uninterrupted
+            logger.debug(f"EmergencyEngine error (non-fatal): {exc}")
 
     def reset(self):
         """Reset state machine to NORMAL."""

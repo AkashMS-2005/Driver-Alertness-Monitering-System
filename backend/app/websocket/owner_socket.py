@@ -1,6 +1,7 @@
 """Owner dashboard WebSocket endpoint — /ws/owner/{owner_id}
 
 Provides real-time safety status snapshots, vehicle status, and drowsiness events to the Owner Dashboard.
+Also sends the current active emergency state when the owner connects.
 """
 
 import json
@@ -14,8 +15,8 @@ logger = logging.getLogger("smartdrive")
 router = APIRouter()
 
 
-async def _send_owner_initial_state(websocket: WebSocket):
-    """Send initial safety snapshot, AI connection, and recent events to Owner Dashboard."""
+async def _send_owner_initial_state(websocket: WebSocket, owner_id: str):
+    """Send initial safety snapshot, AI connection, recent events, and active emergency."""
     from app.ai_client.ai_ws_client import ai_ws_client
     from app.risk_engine.state_machine import risk_engine
 
@@ -59,12 +60,38 @@ async def _send_owner_initial_state(websocket: WebSocket):
         except Exception:
             pass
 
+    # Send active emergency if one exists — so dashboard shows immediately on reconnect
+    try:
+        from app.db.database import async_session
+        from app.services.emergency_service import emergency_service
+        from app.models.vehicle import Vehicle
+        from sqlalchemy import select
+
+        async with async_session() as db:
+            # Find vehicle associated with this owner
+            veh_res = await db.execute(
+                select(Vehicle).where(Vehicle.owner_id == owner_id).limit(1)
+            )
+            vehicle = veh_res.scalar_one_or_none()
+            if vehicle:
+                payload = await emergency_service.build_active_emergency_payload(
+                    vehicle.id, db
+                )
+                if payload:
+                    await websocket.send_text(json.dumps(payload, default=str))
+                    logger.info(
+                        f"Sent active emergency state to owner {owner_id}: "
+                        f"emergency={payload.get('emergency_id')} status={payload.get('status')}"
+                    )
+    except Exception as exc:
+        logger.debug(f"Could not send active emergency on connect (non-fatal): {exc}")
+
 
 @router.websocket("/ws/owner/{owner_id}")
 async def owner_websocket(websocket: WebSocket, owner_id: str):
     """WebSocket endpoint for the owner-facing web dashboard."""
     await manager.connect_owner(owner_id, websocket)
-    await _send_owner_initial_state(websocket)
+    await _send_owner_initial_state(websocket, owner_id)
     try:
         while True:
             data = await websocket.receive_text()

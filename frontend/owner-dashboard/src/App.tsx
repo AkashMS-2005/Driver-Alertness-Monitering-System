@@ -15,6 +15,12 @@ L.Icon.Default.mergeOptions({
 // ─────────────────────────────────────────────────────────────
 type AIState = 'NORMAL' | 'DROWSY' | 'MICROSLEEP';
 type PageTab = 'dashboard' | 'trip' | 'history' | 'emergency';
+type EmergencyStatus =
+  | 'ACTIVE'
+  | 'DRIVER_RECOVERED'
+  | 'ASSISTANCE_RESPONDED'
+  | 'CANCELLED'
+  | 'RESOLVED';
 
 interface DrowsinessData {
   state: AIState;
@@ -71,6 +77,28 @@ interface DashboardState {
   trip: TripInfo;
   location: LocationInfo;
   safety_events: SafetyEvent[];
+}
+
+interface ActiveEmergency {
+  emergency_id: string;
+  status: EmergencyStatus;
+  vehicle_id: string;
+  trip_id: string;
+  microsleep_count: number;
+  drowsiness_percentage: number;
+  latitude: number | null;
+  longitude: number | null;
+  place_name: string | null;
+  gps_source: string;
+  assistance_name: string | null;
+  assistance_distance_km: number | null;
+  triggered_at: string | null;
+  response_message: string | null;
+  responded_at: string | null;
+  cancelled_at: string | null;
+  cancelled_reason: string | null;
+  // local flag — set after cancel
+  _dismissed?: boolean;
 }
 
 interface EmergencyResult {
@@ -140,6 +168,245 @@ function fmtDuration(secs: number) {
   if (h > 0) return `${h}h ${m}m ${s}s`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+// ─────────────────────────────────────────────────────────────
+// EmergencyAlertCard — shown when there is an active emergency
+// ─────────────────────────────────────────────────────────────
+function EmergencyAlertCard({
+  emergency,
+  onCancel,
+}: {
+  emergency: ActiveEmergency;
+  onCancel: () => void;
+}) {
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState('');
+  const [responding, setResponding] = useState(false);
+
+  const status = emergency.status;
+
+  // Determine card appearance
+  const isActive = status === 'ACTIVE';
+  const isRecovered = status === 'DRIVER_RECOVERED';
+  const isResponded = status === 'ASSISTANCE_RESPONDED';
+
+  // Hide card after resolved/cancelled (handled by parent dismiss)
+  if (status === 'CANCELLED' || status === 'RESOLVED' || emergency._dismissed) {
+    return null;
+  }
+
+  async function simulateAssistanceResponse() {
+    setResponding(true);
+    try {
+      const tollName = emergency.assistance_name || 'Nearest Toll Plaza';
+      const res = await fetch(`${apiBase()}/api/v1/emergency/${emergency.emergency_id}/respond`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: `Highway patrol unit dispatched from ${tollName}. En route, ETA 8 mins.`
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json();
+        console.error('Response error:', d);
+      }
+    } catch (err) {
+      console.error('Failed to submit response:', err);
+    } finally {
+      setResponding(false);
+    }
+  }
+
+  async function confirmCancel() {
+    setCancelling(true);
+    setCancelError('');
+    try {
+      const res = await fetch(`${apiBase()}/api/v1/emergency/${emergency.emergency_id}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Driver recovered and cancelled emergency.' }),
+      });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.detail || 'Cancellation failed');
+      }
+      onCancel();
+      setShowConfirm(false);
+    } catch (err: unknown) {
+      setCancelError(err instanceof Error ? err.message : 'Cancellation failed');
+    } finally {
+      setCancelling(false);
+    }
+  }
+
+  return (
+    <div className={`emergency-alert-card ${
+      isActive ? 'emg-active' : isRecovered ? 'emg-recovered' : 'emg-responded'
+    }`}>
+      {/* Header */}
+      <div className="emg-card-header">
+        <div className="emg-header-icon">
+          {isActive ? '🚨' : isRecovered ? '⚠️' : '✓'}
+        </div>
+        <div className="emg-header-text">
+          <span className="emg-title">
+            {isActive && 'EMERGENCY ACTIVE'}
+            {isRecovered && 'DRIVER RECOVERED — EMERGENCY ACTIVE'}
+            {isResponded && 'ASSISTANCE RESPONDED'}
+          </span>
+          <span className={`emg-status-badge ${
+            isActive ? 'emg-badge-red' : isRecovered ? 'emg-badge-amber' : 'emg-badge-green'
+          }`}>
+            {status.replace(/_/g, ' ')}
+          </span>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div className="emg-card-body">
+        {/* Driver metrics */}
+        <div className="emg-metrics-row">
+          <div className="emg-metric">
+            <span className="emg-metric-label">Drowsiness</span>
+            <span className="emg-metric-value txt-red">{emergency.drowsiness_percentage.toFixed(0)}%</span>
+          </div>
+          <div className="emg-metric">
+            <span className="emg-metric-label">Microsleep Events</span>
+            <span className="emg-metric-value txt-red">{emergency.microsleep_count}</span>
+          </div>
+          <div className="emg-metric">
+            <span className="emg-metric-label">Driver Status</span>
+            <span className="emg-metric-value">
+              {isRecovered ? '✓ AWAKE' : '⚠ SLEEPING'}
+            </span>
+          </div>
+        </div>
+
+        {/* Location */}
+        <div className="emg-location-row">
+          <div className="emg-loc-item">
+            <span className="emg-loc-label">📍 Location</span>
+            <span className="emg-loc-value">
+              {emergency.place_name || (emergency.latitude
+                ? `${emergency.latitude.toFixed(4)}, ${emergency.longitude?.toFixed(4)}`
+                : 'Unavailable')}
+            </span>
+          </div>
+          {emergency.latitude && (
+            <div className="emg-loc-item">
+              <span className="emg-loc-label">Coordinates</span>
+              <span className="emg-loc-value mono">
+                {emergency.latitude.toFixed(6)}, {emergency.longitude?.toFixed(6)}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Assistance */}
+        <div className="emg-assistance-row">
+          <div className="emg-assist-item">
+            <span className="emg-loc-label">🚧 Nearest Assistance</span>
+            <span className="emg-loc-value">
+              {emergency.assistance_name || '[DEV] Demo Highway Assistance'}
+            </span>
+          </div>
+          {emergency.assistance_distance_km !== null && emergency.assistance_distance_km !== undefined && (
+            <div className="emg-assist-item">
+              <span className="emg-loc-label">Distance</span>
+              <span className="emg-loc-value txt-blue">{emergency.assistance_distance_km.toFixed(1)} km</span>
+            </div>
+          )}
+          <div className="emg-assist-item">
+            <span className="emg-loc-label">Assistance Status</span>
+            <span className={`emg-assist-status ${
+              isResponded ? 'txt-green' : 'txt-amber'
+            }`}>
+              {isResponded ? '✓ Responded' : '⏳ Waiting for response'}
+            </span>
+          </div>
+        </div>
+
+        {/* Assistance response message */}
+        {isResponded && emergency.response_message && (
+          <div className="emg-response-box">
+            <span className="emg-response-label">✓ Assistance Message</span>
+            <p className="emg-response-text">"{emergency.response_message}"</p>
+            {emergency.responded_at && (
+              <span className="emg-response-time">Response time: {fmtTime(emergency.responded_at)}</span>
+            )}
+          </div>
+        )}
+
+        {/* Dev note */}
+        <div className="emg-dev-note">
+          ℹ [DEV] Demo assistance data. No real toll authority has been contacted.
+        </div>
+      </div>
+
+      {/* Footer actions */}
+      <div className="emg-card-footer">
+        <div className="emg-triggered-info">
+          Emergency #{emergency.emergency_id.slice(-8).toUpperCase()}
+          {emergency.triggered_at && ` · ${fmtTime(emergency.triggered_at)}`}
+        </div>
+        <div className="emg-footer-buttons">
+          {!isResponded && (
+            <button
+              id="btn-simulate-response"
+              className="btn-simulate-response"
+              onClick={simulateAssistanceResponse}
+              disabled={responding}
+              title="[DEV] Simulate toll or highway authority responding to this emergency"
+            >
+              {responding ? 'Dispatching…' : '⚡ SIMULATE TOLL RESPONSE'}
+            </button>
+          )}
+          {isRecovered && !isResponded && (
+            <button
+              id="btn-cancel-emergency"
+              className="btn-cancel-emergency"
+              onClick={() => setShowConfirm(true)}
+              disabled={cancelling}
+            >
+              ✕ CANCEL EMERGENCY
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Cancel confirmation dialog */}
+      {showConfirm && (
+        <div className="emg-confirm-overlay">
+          <div className="emg-confirm-dialog">
+            <h4>Cancel Emergency?</h4>
+            <p>
+              Driver appears to have recovered.<br />
+              Are you sure you want to cancel the emergency assistance request?
+            </p>
+            {cancelError && <p className="emg-confirm-error">{cancelError}</p>}
+            <div className="emg-confirm-actions">
+              <button
+                className="btn-confirm-cancel"
+                onClick={confirmCancel}
+                disabled={cancelling}
+              >
+                {cancelling ? 'Cancelling…' : '✕ CANCEL EMERGENCY'}
+              </button>
+              <button
+                className="btn-confirm-keep"
+                onClick={() => { setShowConfirm(false); setCancelError(''); }}
+                disabled={cancelling}
+              >
+                ✓ KEEP EMERGENCY ACTIVE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1020,6 +1287,10 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
   const [aiConnected, setAiConnected] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
+  // ── Emergency state ──
+  const [activeEmergency, setActiveEmergency] = useState<ActiveEmergency | null>(null);
+  const [microsleepCount, setMicrosleepCount] = useState(0);
+
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Poll aggregated state every 5s
@@ -1042,6 +1313,98 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [pollDashboard]);
+
+  // ── Owner WebSocket — receives real-time emergency events ──
+  useEffect(() => {
+    if (!user.owner_id) return;
+    let ownerWs: WebSocket;
+    let ownerReconnect: ReturnType<typeof setTimeout>;
+
+    function connectOwner() {
+      ownerWs = new WebSocket(`${wsBase()}/ws/owner/${user.owner_id}`);
+
+      ownerWs.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          const t = msg.type || msg.event_type || '';
+
+          if (t === 'EMERGENCY_TRIGGERED') {
+            setActiveEmergency({
+              emergency_id: msg.emergency_id,
+              status: msg.status || 'ACTIVE',
+              vehicle_id: msg.vehicle_id || '',
+              trip_id: msg.trip_id || '',
+              microsleep_count: msg.microsleep_count ?? 0,
+              drowsiness_percentage: msg.drowsiness_percentage ?? 0,
+              latitude: msg.latitude ?? null,
+              longitude: msg.longitude ?? null,
+              place_name: msg.place_name ?? null,
+              gps_source: msg.gps_source || 'UNKNOWN',
+              assistance_name: msg.assistance_name ?? null,
+              assistance_distance_km: msg.assistance_distance_km ?? null,
+              triggered_at: msg.triggered_at ?? null,
+              response_message: null,
+              responded_at: null,
+              cancelled_at: null,
+              cancelled_reason: null,
+            });
+            setMicrosleepCount(msg.microsleep_count ?? 0);
+          } else if (t === 'DRIVER_RECOVERED') {
+            setActiveEmergency((prev) =>
+              prev ? {
+                ...prev,
+                status: 'DRIVER_RECOVERED',
+                drowsiness_percentage: msg.drowsiness_percentage ?? prev.drowsiness_percentage,
+              } : prev
+            );
+          } else if (t === 'ASSISTANCE_RESPONSE') {
+            setActiveEmergency((prev) =>
+              prev ? {
+                ...prev,
+                status: 'ASSISTANCE_RESPONDED',
+                response_message: msg.message ?? null,
+                responded_at: msg.responded_at ?? null,
+              } : prev
+            );
+          } else if (t === 'EMERGENCY_CANCELLED') {
+            setActiveEmergency((prev) =>
+              prev ? {
+                ...prev,
+                status: 'CANCELLED',
+                _dismissed: true,
+                cancelled_at: msg.cancelled_at ?? null,
+                cancelled_reason: msg.reason ?? null,
+              } : prev
+            );
+            // Dismiss alert after 3 seconds
+            setTimeout(() => setActiveEmergency(null), 3000);
+          } else if (t === 'EMERGENCY_RESOLVED') {
+            setActiveEmergency((prev) =>
+              prev ? { ...prev, status: 'RESOLVED', _dismissed: true } : prev
+            );
+            setTimeout(() => setActiveEmergency(null), 5000);
+          } else if (t === 'EMERGENCY_UPDATED') {
+            setActiveEmergency((prev) =>
+              prev ? { ...prev, status: (msg.status as EmergencyStatus) ?? prev.status } : prev
+            );
+          }
+        } catch {
+          // ignore parsing errors
+        }
+      };
+
+      ownerWs.onclose = () => {
+        ownerReconnect = setTimeout(connectOwner, 4000);
+      };
+      ownerWs.onerror = () => ownerWs.close();
+    }
+
+    connectOwner();
+    return () => {
+      clearTimeout(ownerReconnect);
+      ownerWs?.close();
+    };
+  }, [user.owner_id]);
 
   // WebSocket for AI updates and camera frames
   useEffect(() => {
@@ -1214,6 +1577,21 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
         <div className={`alert-banner-top ${state === 'MICROSLEEP' ? 'banner-microsleep' : 'banner-drowsy'}`}>
           <span className="banner-icon">{state === 'MICROSLEEP' ? '🚨' : '⚠'}</span>
           <span>{drowsiness.alert_message}</span>
+          {microsleepCount > 0 && (
+            <span className="banner-microsleep-count">
+              Microsleep Events: {microsleepCount}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* ── Active Emergency Alert Card ── */}
+      {activeEmergency && !activeEmergency._dismissed && (
+        <div className="emergency-card-wrapper">
+          <EmergencyAlertCard
+            emergency={activeEmergency}
+            onCancel={() => setActiveEmergency((prev) => prev ? { ...prev, _dismissed: true } : null)}
+          />
         </div>
       )}
 
