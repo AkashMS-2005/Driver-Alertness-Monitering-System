@@ -150,8 +150,10 @@ class SafetyStateMachine:
         # and automatic emergency trigger logic.
         # ---------------------------------------------------------------
         drowsiness_pct = round(float(ai_event.get("perclos", 0.0)), 1)
+        alertness_score = int(ai_event.get("alertness_score", 100))
+        head_state = str(ai_event.get("head_state", "NORMAL"))
         asyncio.create_task(
-            self._run_emergency_engine(new_state, drowsiness_pct)
+            self._run_emergency_engine(new_state, drowsiness_pct, alertness_score, head_state)
         )
 
         # Build normalized and enriched telemetry payload for the driver dashboard
@@ -168,10 +170,17 @@ class SafetyStateMachine:
             "perclos": round(float(ai_event.get("perclos", 0.0)), 1),
             "mar": round(float(ai_event.get("mar", 0.0)), 3),
             "yawning": bool(ai_event.get("yawning", False)),
+            "alertness_score": alertness_score,
+            "head_state": head_state,
+            "alert_label": str(ai_event.get("alert_label", "NORMAL")),
+            "fused_risk": round(float(ai_event.get("fused_risk", 0.0)), 3),
             "recent_events": self.get_recent_events(limit=10),
         }
 
-    async def _run_emergency_engine(self, state: str, drowsiness_pct: float):
+    async def _run_emergency_engine(
+        self, state: str, drowsiness_pct: float,
+        alertness_score: int = 100, head_state: str = "NORMAL"
+    ):
         """Non-blocking delegation to the EmergencyEngine."""
         try:
             from app.risk_engine.emergency_engine import emergency_engine
@@ -180,6 +189,8 @@ class SafetyStateMachine:
                 drowsiness_percentage=drowsiness_pct,
                 vehicle_id=_active_vehicle_id,
                 trip_id=_active_trip_id,
+                alertness_score=alertness_score,
+                head_state=head_state,
             )
         except Exception as exc:
             # Non-fatal — log and proceed so live stream remains uninterrupted

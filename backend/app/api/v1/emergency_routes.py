@@ -109,6 +109,8 @@ class EmergencyResponse(BaseModel):
     cancelled_at: datetime | None = None
     cancelled_reason: str | None = None
     resolved_at: datetime | None = None
+    assistance_name: str | None = None
+    assistance_distance_km: float | None = None
     model_config = {"from_attributes": True}
 
 
@@ -177,6 +179,68 @@ async def get_active_emergency(
     if not payload:
         return {"active": False, "emergency": None}
     return {"active": True, "emergency": payload}
+
+
+@router.get("/history/all")
+async def get_all_emergency_history(
+    limit: int = 100, db: AsyncSession = Depends(get_db)
+):
+    """Return emergency history for ALL vehicles, newest first.
+
+    Used by the owner dashboard Emergency History section.
+    Response is enriched with assistance_name and assistance_distance_km
+    from the linked HighwayAssistance record.
+    """
+    from sqlalchemy import select as sa_select
+    result = await db.execute(
+        sa_select(EmergencyEvent)
+        .order_by(EmergencyEvent.detected_at.desc())
+        .limit(limit)
+    )
+    events = list(result.scalars().all())
+
+    # Enrich each event with HighwayAssistance data
+    enriched = []
+    for ev in events:
+        ev_dict = {
+            "id": ev.id,
+            "trip_id": ev.trip_id,
+            "vehicle_id": ev.vehicle_id,
+            "emergency_type": ev.emergency_type,
+            "status": ev.status,
+            "trigger_source": getattr(ev, "trigger_source", "UNKNOWN"),
+            "description": ev.description,
+            "latitude": ev.latitude,
+            "longitude": ev.longitude,
+            "place_name": ev.place_name,
+            "microsleep_count": ev.microsleep_count,
+            "drowsiness_percentage": ev.drowsiness_percentage,
+            "detected_at": ev.detected_at,
+            "triggered_at": ev.triggered_at,
+            "response_message": ev.response_message,
+            "responded_at": ev.responded_at,
+            "cancelled_at": ev.cancelled_at,
+            "cancelled_reason": ev.cancelled_reason,
+            "resolved_at": ev.resolved_at,
+            "assistance_name": None,
+            "assistance_distance_km": None,
+        }
+        # Fetch linked HighwayAssistance
+        try:
+            assist_res = await db.execute(
+                sa_select(HighwayAssistance)
+                .where(HighwayAssistance.emergency_id == ev.id)
+                .limit(1)
+            )
+            assist = assist_res.scalar_one_or_none()
+            if assist:
+                ev_dict["assistance_name"] = assist.assistance_name
+                ev_dict["assistance_distance_km"] = assist.distance_km
+        except Exception:
+            pass
+        enriched.append(ev_dict)
+
+    return enriched
 
 
 @router.get("/history/{vehicle_id}", response_model=list[EmergencyResponse])

@@ -1,0 +1,15 @@
+﻿Total lines: 817
+python : Traceback (most recent call last):
+At line:1 char:1
++ python inspect_lines.py 2>&1 | Out-File -Encoding utf8 inspect_out.tx ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "A:\Major DAMS\Driver-Alertness-Monitering-System\backend\inspect_lines.py", line 6, in <module>
+    print(f"{i}: {repr(l)}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\akash\AppData\Local\Programs\Python\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 20-21: character maps to <undefined>

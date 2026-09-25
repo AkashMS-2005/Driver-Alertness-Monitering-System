@@ -2,11 +2,14 @@
 
 This module is the core of the automatic emergency system.
 
-Rules:
+Primary trigger rule (per specification):
+  microsleep_count >= 2
+  → Automatic emergency triggered.
+  → No drowsiness percentage condition is required as a blocker.
+
+Additional rules:
   - Counts SEPARATE microsleep EVENTS (state transitions into MICROSLEEP).
   - Does NOT count every frame of MICROSLEEP.
-  - Triggers automatic emergency when:
-      microsleep_count >= 2 AND drowsiness_percentage > 50
   - Only ONE active emergency per vehicle/trip at a time.
   - Recovery requires NORMAL + drowsiness <= 50% continuously for
     RECOVERY_CONFIRMATION_SECONDS (default 10s).
@@ -15,7 +18,7 @@ Rules:
 
 State machine (in-memory, per trip):
   NO_ACTIVE_EMERGENCY
-      → (conditions met) → ACTIVE
+      → (microsleep_count >= 2) → ACTIVE
   ACTIVE
       → (assistance responds) → ASSISTANCE_RESPONDED → RESOLVED
       → (driver recovers 10s) → DRIVER_RECOVERED
@@ -102,11 +105,21 @@ class EmergencyEngine:
         drowsiness_percentage: float,
         vehicle_id: str,
         trip_id: str,
+        alertness_score: int = 100,
+        head_state: str = "NORMAL",
     ):
         """Called on every AI frame. Handles microsleep counting + emergency logic.
 
         This is the ONLY entry point from the AI pipeline. It must be fast —
         any DB writes are done via asyncio.create_task to avoid blocking.
+
+        Args:
+            state:               Current AI state (NORMAL / DROWSY / MICROSLEEP).
+            drowsiness_percentage: PERCLOS-based drowsiness % (0-100).
+            vehicle_id:          Active vehicle UUID.
+            trip_id:             Active trip UUID.
+            alertness_score:     Fusion-based alertness score (0-100).
+            head_state:          Head pose state (NORMAL / DEVIATING / DISTRACTED).
         """
         async with self._lock:
             await self._process_event(state, drowsiness_percentage, vehicle_id, trip_id)
@@ -180,10 +193,14 @@ class EmergencyEngine:
         if time.monotonic() < self._cooldown_until:
             return
 
-        # Condition: microsleep_count >= 2 AND drowsiness > 50 (strictly)
-        if self._microsleep_count >= 2 and drowsiness_percentage > 50.0:
+        # PRIMARY TRIGGER: microsleep_count >= 2
+        # This is the primary automatic emergency condition.
+        # (No drowsiness % guard — the microsleep count alone is the trigger
+        #  per the project specification. Two separate microsleep events are
+        #  clinically significant regardless of the current PERCLOS value.)
+        if self._microsleep_count >= 2:
             logger.warning(
-                f"AUTOMATIC EMERGENCY TRIGGERED — "
+                f"[EMERGENCY] AUTOMATIC EMERGENCY TRIGGERED — "
                 f"microsleep_count={self._microsleep_count} "
                 f"drowsiness={drowsiness_percentage:.1f}% "
                 f"vehicle={vehicle_id} trip={trip_id}"

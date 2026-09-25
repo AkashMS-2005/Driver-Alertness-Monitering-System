@@ -1,32 +1,105 @@
 # SmartDrive Guardian — AI Detection Thresholds
-# These are internal tuning parameters. None of these values are ever sent to the frontend.
-# Phase 2: Drowsiness detection only.
+# Multi-Modal Driver Alertness Monitoring System (DAMS)
+# ─────────────────────────────────────────────────────
+# All parameters are configurable. No values here are claimed to be
+# scientifically optimal — they are sensible development defaults that
+# must be tuned against labelled evaluation data.
 
+# ─────────────────────────────────────────────────────
+# EYE STATE — EAR thresholds
+# ─────────────────────────────────────────────────────
 eye_state:
-  # Eye Aspect Ratio (EAR) thresholds
-  ear_threshold: 0.20          # Below this = eyes closed
-  blink_duration_ms: 300       # Normal blink duration
-  prolonged_closure_ms: 1500   # Eyes closed this long = drowsy signal
+  ear_threshold: 0.20           # Below this → eyes considered closed
+  blink_duration_ms: 300        # Normal blink (informational, not used in logic)
+  prolonged_closure_ms: 1500    # Eyes closed this long = drowsy signal
 
+# ─────────────────────────────────────────────────────
+# DROWSINESS — temporal thresholds (seconds)
+# ─────────────────────────────────────────────────────
 drowsiness:
-  # Temporal thresholds (seconds of continuous eye closure)
-  drowsy_time: 1.5             # eyes closed > 1.5s → DROWSY
-  microsleep_time: 3.0         # eyes closed > 3.0s → MICROSLEEP
-  # PERCLOS
-  perclos_window_seconds: 60   # Rolling window for PERCLOS calculation
-  perclos_warning: 30.0        # PERCLOS above this = fatigue warning
+  drowsy_time: 1.5              # Continuous closure ≥ 1.5s → DROWSY
+  microsleep_time: 3.0          # Continuous closure ≥ 3.0s → MICROSLEEP
+  perclos_window_seconds: 60    # Rolling window for PERCLOS (seconds)
+  perclos_warning: 30.0         # PERCLOS above this = elevated fatigue
 
+# ─────────────────────────────────────────────────────
+# MOUTH STATE — MAR / yawning thresholds
+# ─────────────────────────────────────────────────────
+# TALKING vs YAWNING disambiguation:
+#   MAR > mar_threshold for < yawn_min_duration  → possible talking / normal expression
+#   MAR > mar_threshold for ≥ yawn_min_duration  → confirmed yawn
 mouth_state:
-  # Mouth Aspect Ratio (MAR) — yawn detection
-  # Old behaviour: yawning = MAR > mar_threshold (single frame, caused false positives from talking)
-  # New behaviour: temporal state machine — mouth must remain above mar_threshold for
-  # yawn_min_duration seconds continuously before a yawn is confirmed.
-  mar_threshold: 0.80          # Above this = candidate for yawning
-  yawn_min_duration: 1.0       # seconds mouth must stay above threshold to confirm a yawn
-  yawn_reset_duration: 0.3     # seconds mouth must stay closed to end the current yawn episode
+  mar_threshold: 0.80           # MAR above this = open-mouth candidate
+  yawn_min_duration: 2.0        # Seconds of continuous open mouth required to confirm a yawn
+  yawn_reset_duration: 0.3      # Seconds mouth must stay closed to end the current yawn episode
   #
   # Tuning guidance:
-  #   If normal talking still triggers yawning, increase yawn_min_duration (try 1.2 – 1.5).
-  #   If genuine yawns are missed, decrease yawn_min_duration (try 0.8 – 0.9).
-  #   If the yawn "flickers" at end, increase yawn_reset_duration (try 0.5).
-  #   If a new yawn is counted too quickly after a previous one, increase yawn_reset_duration.
+  #   Increase yawn_min_duration if talking still triggers yawns (try 2.5).
+  #   Decrease yawn_min_duration if genuine yawns are missed (try 1.5).
+  #   Increase yawn_reset_duration if the yawn "flickers" at the end (try 0.5).
+
+# ─────────────────────────────────────────────────────
+# HEAD POSE — 3D head orientation thresholds (degrees)
+# ─────────────────────────────────────────────────────
+# Head pose is estimated from 2D landmarks via solvePnP.
+# All angles are relative to a neutral forward-looking pose.
+# Only SUSTAINED deviations beyond the thresholds trigger signals.
+#
+# Positive pitch = head tilted downward
+# Positive yaw   = head rotated to the right
+# Positive roll  = head tilted to the right shoulder
+head_pose:
+  pitch_threshold: 20.0         # Degrees. Beyond this (up or down) = head deviation
+  yaw_threshold: 30.0           # Degrees. Beyond this (left or right) = head deviation
+  roll_threshold: 20.0          # Degrees. Beyond this = head deviation
+  deviation_duration: 2.0       # Seconds of sustained deviation → distraction signal
+  #
+  # Tuning guidance:
+  #   If mirror-checks trigger distraction, increase yaw_threshold (try 35-40°).
+  #   If head-drop goes undetected, decrease pitch_threshold (try 15°).
+
+# ─────────────────────────────────────────────────────
+# TEMPORAL SLIDING WINDOW — short-term feature smoothing
+# ─────────────────────────────────────────────────────
+temporal:
+  window_seconds: 2.0           # Short-term window for EAR/MAR/head-pose smoothing
+  #
+  # The 60-second PERCLOS window is defined separately under drowsiness.
+
+# ─────────────────────────────────────────────────────
+# MULTI-MODAL FUSION — weighted risk combination
+# ─────────────────────────────────────────────────────
+# R = w_eye * eye_risk + w_yawn * yawn_risk + w_head * head_risk + w_temporal * temporal_drift
+# All weights must sum to 1.0.
+# These are development defaults — tune against labelled data.
+fusion:
+  eye_weight: 0.45              # Eye closure / PERCLOS contribution
+  yawn_weight: 0.25             # Yawning / MAR contribution
+  head_pose_weight: 0.20        # Head pose distraction / fatigue contribution
+  temporal_weight: 0.10         # Temporal drift (sustained impairment over time)
+  #
+  # Alertness Score = 100 × (1 − fused_risk)
+  # Range: 0 (maximum impairment) to 100 (fully alert)
+
+# ─────────────────────────────────────────────────────
+# MULTI-LEVEL ALERT THRESHOLDS — fused risk → alert level
+# ─────────────────────────────────────────────────────
+# Alert levels map to driver-facing states:
+#   LEVEL 0 (NORMAL)    → AWAKE     (Low risk)
+#   LEVEL 1 (MILD)      → AWAKE     (Caution — does not change driver status alone)
+#   LEVEL 2 (MODERATE)  → DROWSY    (Fatigue warning)
+#   LEVEL 3 (CRITICAL)  → SLEEPING  (Imminent hazard / microsleep zone)
+alert_levels:
+  normal:
+    max_risk: 0.25              # fused_risk ≤ 0.25 → LEVEL 0 NORMAL
+  mild:
+    max_risk: 0.45              # fused_risk 0.25–0.45 → LEVEL 1 MILD
+  moderate:
+    max_risk: 0.65              # fused_risk 0.45–0.65 → LEVEL 2 MODERATE
+  critical:
+    min_risk: 0.65              # fused_risk > 0.65 → LEVEL 3 CRITICAL
+  #
+  # NOTE: Alert level and driver state are separate concepts.
+  # The driver STATE (NORMAL/DROWSY/MICROSLEEP) is determined primarily
+  # by eye closure duration (temporal analysis), not by the alert level alone.
+  # The fused alert level provides additional context and can escalate state.

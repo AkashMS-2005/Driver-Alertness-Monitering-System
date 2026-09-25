@@ -27,6 +27,9 @@ interface DrowsinessData {
   perclos: number;
   yawning: boolean;
   alert_message: string | null;
+  alertness_score: number;    // 0-100, from multi-modal fusion
+  head_state: string;         // NORMAL / DEVIATING / DISTRACTED / UNKNOWN
+  alert_label: string;        // NORMAL / MILD / MODERATE / CRITICAL
   timestamp?: string;
 }
 
@@ -591,16 +594,26 @@ function DriverCameraBox({
 function DriverSafetyCard({
   state,
   perclos,
+  alertnessScore,
+  headState,
+  alertLabel,
   vehicle,
   aiConnected,
 }: {
   state: AIState;
   perclos: number;
+  alertnessScore: number;
+  headState: string;
+  alertLabel: string;
   vehicle?: VehicleInfo;
   aiConnected: boolean;
 }) {
   const displayStatus = STATUS_LABEL[state] || 'AWAKE';
   const statusClass = STATUS_CLASS[state] || 'status-awake';
+
+  const alertnessColor = alertnessScore >= 75 ? 'txt-green' : alertnessScore >= 50 ? 'txt-amber' : 'txt-red';
+  const headStateIcon = headState === 'DISTRACTED' ? '⚠' : headState === 'DEVIATING' ? '↗' : '✓';
+  const headStateColor = headState === 'DISTRACTED' ? 'txt-red' : headState === 'DEVIATING' ? 'txt-amber' : 'txt-green';
 
   return (
     <div className="safety-card">
@@ -620,6 +633,22 @@ function DriverSafetyCard({
           </div>
         </div>
 
+        {/* Alertness Score — from multi-modal fusion */}
+        <div className="drowsiness-block">
+          <div className="drowsiness-top">
+            <span className="block-label">Alertness Score</span>
+            <span className={`drowsiness-value ${alertnessColor}`}>
+              {alertnessScore}/100
+            </span>
+          </div>
+          <div className="progress-bar-bg">
+            <div
+              className={`progress-bar-fill ${alertnessScore >= 75 ? 'bar-green' : alertnessScore >= 50 ? 'bar-amber' : 'bar-red'}`}
+              style={{ width: `${Math.min(Math.max(alertnessScore, 0), 100)}%` }}
+            />
+          </div>
+        </div>
+
         {/* Drowsiness % */}
         <div className="drowsiness-block">
           <div className="drowsiness-top">
@@ -633,6 +662,19 @@ function DriverSafetyCard({
               className={`progress-bar-fill ${perclos > 60 ? 'bar-red' : perclos > 30 ? 'bar-amber' : 'bar-green'}`}
               style={{ width: `${Math.min(Math.max(perclos, 0), 100)}%` }}
             />
+          </div>
+        </div>
+
+        {/* Head Pose State */}
+        <div className="vehicle-block" style={{ marginTop: '8px' }}>
+          <span className="block-label">Head Pose</span>
+          <div className="data-row">
+            <span className={`data-val ${headStateColor}`}>
+              {headStateIcon} {headState === 'DISTRACTED' ? 'DISTRACTED' : headState === 'DEVIATING' ? 'DEVIATING' : 'NORMAL'}
+            </span>
+            <span className="data-val muted" style={{ fontSize: '0.75rem' }}>
+              Alert: {alertLabel}
+            </span>
           </div>
         </div>
 
@@ -712,7 +754,15 @@ function DashboardPage({
       {/* Row 1: Camera + Driver Status */}
       <div className="top-grid">
         <DriverCameraBox cameraFrame={cameraFrame} cameraConnected={cameraConnected} aiConnected={aiConnected} />
-        <DriverSafetyCard state={drowsiness.state} perclos={drowsiness.perclos} vehicle={vehicle} aiConnected={aiConnected} />
+        <DriverSafetyCard
+          state={drowsiness.state}
+          perclos={drowsiness.perclos}
+          alertnessScore={drowsiness.alertness_score}
+          headState={drowsiness.head_state}
+          alertLabel={drowsiness.alert_label}
+          vehicle={vehicle}
+          aiConnected={aiConnected}
+        />
       </div>
 
       {/* Row 2: Current Trip + Current Location */}
@@ -1071,6 +1121,28 @@ function DrowsinessHistoryPage({ events }: { events: SafetyEvent[] }) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Emergency History Item type
+// ─────────────────────────────────────────────────────────────
+interface EmergencyHistoryItem {
+  id: string;
+  status: string;
+  microsleep_count: number | null;
+  drowsiness_percentage: number | null;
+  latitude: number | null;
+  longitude: number | null;
+  place_name: string | null;
+  triggered_at: string | null;
+  detected_at: string;
+  response_message: string | null;
+  responded_at: string | null;
+  cancelled_at: string | null;
+  cancelled_reason: string | null;
+  resolved_at: string | null;
+  assistance_name?: string | null;
+  assistance_distance_km?: number | null;
+}
+
+// ─────────────────────────────────────────────────────────────
 // Page 4: Emergency Assistance View
 // ─────────────────────────────────────────────────────────────
 function EmergencyAssistancePage({
@@ -1084,8 +1156,32 @@ function EmergencyAssistancePage({
   const [result, setResult] = useState<EmergencyResult | null>(null);
   const [placeName, setPlaceName] = useState<string>('');
   const [error, setError] = useState('');
+  const [history, setHistory] = useState<EmergencyHistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const vehicle = dash?.vehicle;
+
+  // Load emergency history from backend on mount (persists across page refresh)
+  useEffect(() => {
+    async function loadHistory() {
+      setHistoryLoading(true);
+      try {
+        const res = await fetch(`${apiBase()}/api/v1/emergency/history/all`);
+        if (res.ok) {
+          const data = await res.json();
+          setHistory(data as EmergencyHistoryItem[]);
+        } else {
+          // Fallback: try vehicle-specific endpoint
+          if (vehicle?.id) {
+            const r2 = await fetch(`${apiBase()}/api/v1/emergency/history/${vehicle.id}`);
+            if (r2.ok) setHistory(await r2.json());
+          }
+        }
+      } catch { /* ignore */ }
+      setHistoryLoading(false);
+    }
+    loadHistory();
+  }, [vehicle?.id]);
 
   async function triggerEmergency() {
     setLoading(true);
@@ -1266,6 +1362,87 @@ function EmergencyAssistancePage({
           </div>
         </div>
       )}
+
+      {/* ── Emergency History ── */}
+      <div className="history-table-card" style={{ marginTop: '2rem' }}>
+        <div className="card-header">
+          <span className="card-title">EMERGENCY HISTORY</span>
+          <span className="muted small">
+            {historyLoading ? 'Loading…' : `${history.length} records`}
+          </span>
+        </div>
+
+        {history.length === 0 && !historyLoading ? (
+          <div className="empty-state">
+            <span className="empty-icon">🛡️</span>
+            <span className="empty-title">No emergency events recorded.</span>
+            <span className="empty-desc">
+              Emergency records will appear here automatically when microsleep events trigger an
+              automatic emergency (≥ 2 microsleep events), or when a manual emergency is triggered.
+              These records persist across restarts.
+            </span>
+          </div>
+        ) : historyLoading ? (
+          <div className="empty-state">
+            <span className="empty-desc">Loading emergency history…</span>
+          </div>
+        ) : (
+          <div className="table-responsive">
+            <table className="history-table">
+              <thead>
+                <tr>
+                  <th>TIME</th>
+                  <th>STATUS</th>
+                  <th>MICROSLEEPS</th>
+                  <th>DROWSINESS</th>
+                  <th>ASSISTANCE</th>
+                  <th>LOCATION</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((ev) => {
+                  const statusBadge =
+                    ev.status === 'ACTIVE' ? 'badge-red' :
+                    ev.status === 'DRIVER_RECOVERED' ? 'badge-amber' :
+                    ev.status === 'ASSISTANCE_RESPONDED' ? 'badge-blue' :
+                    ev.status === 'RESOLVED' ? 'badge-green' :
+                    ev.status === 'CANCELLED' ? 'badge-neutral' : 'badge-neutral';
+
+                  const displayTime = ev.triggered_at || ev.detected_at;
+                  const locationStr = ev.place_name ||
+                    (ev.latitude ? `${ev.latitude.toFixed(4)}, ${ev.longitude?.toFixed(4)}` : 'Unknown');
+
+                  return (
+                    <tr key={ev.id}>
+                      <td className="mono">{displayTime ? fmtTime(displayTime) : '—'}</td>
+                      <td>
+                        <span className={`status-badge ${statusBadge}`}>
+                          {ev.status.replace(/_/g, ' ')}
+                        </span>
+                      </td>
+                      <td className="txt-red">{ev.microsleep_count ?? '—'}</td>
+                      <td>
+                        {ev.drowsiness_percentage != null
+                          ? `${ev.drowsiness_percentage.toFixed(0)}%`
+                          : '—'}
+                      </td>
+                      <td className="event-desc-cell">
+                        {ev.assistance_name || '—'}
+                        {ev.assistance_distance_km != null && (
+                          <span className="muted" style={{ marginLeft: 6, fontSize: '0.75rem' }}>
+                            ({ev.assistance_distance_km.toFixed(1)} km)
+                          </span>
+                        )}
+                      </td>
+                      <td className="event-desc-cell">{locationStr}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1281,6 +1458,9 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
     perclos: 0,
     yawning: false,
     alert_message: null,
+    alertness_score: 100,
+    head_state: 'NORMAL',
+    alert_label: 'NORMAL',
   });
   const [cameraFrame, setCameraFrame] = useState<string>('');
   const [cameraConnected, setCameraConnected] = useState(false);
@@ -1428,6 +1608,9 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
               perclos: data.perclos ?? 0,
               yawning: data.yawning ?? false,
               alert_message: data.alert_message ?? null,
+              alertness_score: data.alertness_score ?? 100,
+              head_state: data.head_state ?? 'NORMAL',
+              alert_label: data.alert_label ?? 'NORMAL',
               timestamp: data.timestamp,
             });
             setAiConnected(true);
