@@ -1490,3 +1490,80 @@ html, body, #root {
   margin: 0;
 }
 
+/* ── Real-time Assistance Status Display (Replacing Simulate Button) ── */
+.emg-live-assistance-box {
+  width: 100%;
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: rgba(13, 17, 23, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.emg-status-heading {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b949e;
+}
+.emg-status-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.emg-status-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.emg-status-title-badge {
+  font-size: 13px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.emg-status-title-badge.waiting {
+  color: #58a6ff;
+}
+.emg-status-title-badge.accepted {
+  color: #3fb950;
+}
+.emg-status-title-badge.rejected {
+  color: #f85149;
+}
+.emg-status-title-badge.failed {
+  color: #d29922;
+}
+.emg-status-message-text {
+  font-size: 13px;
+  color: #c9d1d9;
+  line-height: 1.4;
+  margin: 4px 0 2px;
+  font-style: italic;
+}
+.emg-status-timestamp {
+  font-size: 11px;
+  color: #7d8590;
+  font-family: monospace;
+}
+.btn-dismiss-emergency {
+  padding: 7px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #c9d1d9;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-dismiss-emergency:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+

@@ -100,6 +100,10 @@ interface ActiveEmergency {
   responded_at: string | null;
   cancelled_at: string | null;
   cancelled_reason: string | null;
+  sms_status?: string | null;
+  sms_sent_at?: string | null;
+  assistance_response_status?: string | null;
+  assistance_phone_number?: string | null;
   // local flag — set after cancel
   _dismissed?: boolean;
 }
@@ -186,41 +190,17 @@ function EmergencyAlertCard({
   const [showConfirm, setShowConfirm] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState('');
-  const [responding, setResponding] = useState(false);
 
   const status = emergency.status;
 
   // Determine card appearance
   const isActive = status === 'ACTIVE';
   const isRecovered = status === 'DRIVER_RECOVERED';
-  const isResponded = status === 'ASSISTANCE_RESPONDED';
+  const isResponded = status === 'ASSISTANCE_RESPONDED' || Boolean(emergency.assistance_response_status);
 
-  // Hide card after resolved/cancelled/responded (handled by parent dismiss)
-  if (status === 'CANCELLED' || status === 'RESOLVED' || status === 'ASSISTANCE_RESPONDED' || emergency._dismissed) {
+  // Hide card after cancelled/resolved/dismissed
+  if (status === 'CANCELLED' || status === 'RESOLVED' || emergency._dismissed) {
     return null;
-  }
-
-  async function simulateAssistanceResponse() {
-    setResponding(true);
-    try {
-      const msg = "Emergency request received. Highway assistance team is responding to the vehicle location. Please remain calm and stay safely inside the vehicle if possible.";
-      const res = await fetch(`${apiBase()}/api/v1/emergency/${emergency.emergency_id}/respond`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg }),
-      });
-      if (res.ok) {
-        onCancel();
-        window.dispatchEvent(new Event('emergency_updated'));
-      } else {
-        const d = await res.json();
-        console.error('Response error:', d);
-      }
-    } catch (err) {
-      console.error('Failed to submit response:', err);
-    } finally {
-      setResponding(false);
-    }
   }
 
   async function confirmCancel() {
@@ -339,9 +319,55 @@ function EmergencyAlertCard({
           </div>
         )}
 
-        {/* Dev note */}
+        {/* Real-time Highway Assistance Status Box (Replaced Manual Simulation) */}
+        <div className="emg-live-assistance-box">
+          <div className="emg-status-heading">ASSISTANCE STATUS</div>
+          <div className="emg-status-content">
+            {isResponded ? (
+              emergency.assistance_response_status === 'REJECTED' ? (
+                <>
+                  <div className="emg-status-title-row">
+                    <span className="emg-status-title-badge rejected">✕ REQUEST REJECTED</span>
+                    {emergency.responded_at && (
+                      <span className="emg-status-timestamp">Response: {fmtTime(emergency.responded_at)}</span>
+                    )}
+                  </div>
+                  <p className="emg-status-message-text">"Highway assistance rejected the request."</p>
+                </>
+              ) : (
+                <>
+                  <div className="emg-status-title-row">
+                    <span className="emg-status-title-badge accepted">✓ REQUEST ACCEPTED</span>
+                    {emergency.responded_at && (
+                      <span className="emg-status-timestamp">Response: {fmtTime(emergency.responded_at)}</span>
+                    )}
+                  </div>
+                  <p className="emg-status-message-text">
+                    "{emergency.response_message || 'Highway assistance team has accepted the request.'}"
+                  </p>
+                </>
+              )
+            ) : emergency.sms_status === 'SMS_FAILED' ? (
+              <>
+                <div className="emg-status-title-row">
+                  <span className="emg-status-title-badge failed">⚠ SMS DELIVERY FAILED</span>
+                </div>
+                <span className="emg-status-timestamp">Waiting for highway assistance response...</span>
+              </>
+            ) : (
+              <>
+                <div className="emg-status-title-row">
+                  <span className="emg-status-title-badge waiting">📱 SMS SENT</span>
+                </div>
+                <span className="emg-status-timestamp">Waiting for highway assistance response...</span>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Real-time info note */}
         <div className="emg-dev-note">
-          ℹ [DEV] Demo assistance data. No real toll authority has been contacted.
+          ℹ Emergency alert dispatched via SMS to highway assistance contact. Live reply synced automatically.
         </div>
       </div>
 
@@ -352,15 +378,14 @@ function EmergencyAlertCard({
           {emergency.triggered_at && ` · ${fmtTime(emergency.triggered_at)}`}
         </div>
         <div className="emg-footer-buttons">
-          {!isResponded && (
+          {isResponded && (
             <button
-              id="btn-simulate-response"
-              className="btn-simulate-response"
-              onClick={simulateAssistanceResponse}
-              disabled={responding}
-              title="[DEV] Simulate toll or highway authority responding to this emergency"
+              id="btn-dismiss-emergency"
+              className="btn-dismiss-emergency"
+              onClick={onCancel}
+              title="Acknowledge and dismiss response"
             >
-              {responding ? 'Dispatching…' : '⚡ SIMULATE TOLL RESPONSE'}
+              ✓ ACKNOWLEDGE & CLOSE
             </button>
           )}
           {isRecovered && !isResponded && (
@@ -590,27 +615,20 @@ function DriverCameraBox({
 // ─────────────────────────────────────────────────────────────
 function DriverSafetyCard({
   state,
-  perclos,
-  alertnessScore,
   headState,
-  alertLabel,
   vehicle,
   aiConnected,
 }: {
   state: AIState;
-  perclos: number;
-  alertnessScore: number;
+  perclos?: number;
+  alertnessScore?: number;
   headState: string;
-  alertLabel: string;
+  alertLabel?: string;
   vehicle?: VehicleInfo;
   aiConnected: boolean;
 }) {
   const displayStatus = STATUS_LABEL[state] || 'AWAKE';
   const statusClass = STATUS_CLASS[state] || 'status-awake';
-
-  const alertnessColor = alertnessScore >= 75 ? 'txt-green' : alertnessScore >= 50 ? 'txt-amber' : 'txt-red';
-  const headStateIcon = headState === 'DISTRACTED' ? '⚠' : headState === 'DEVIATING' ? '↗' : '✓';
-  const headStateColor = headState === 'DISTRACTED' ? 'txt-red' : headState === 'DEVIATING' ? 'txt-amber' : 'txt-green';
 
   return (
     <div className="safety-card">
@@ -1105,6 +1123,10 @@ interface EmergencyHistoryItem {
   resolved_at: string | null;
   assistance_name?: string | null;
   assistance_distance_km?: number | null;
+  sms_status?: string | null;
+  sms_sent_at?: string | null;
+  assistance_phone_number?: string | null;
+  assistance_response_status?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1422,6 +1444,33 @@ function EmergencyAssistancePage({
                       <span className="emg-hist-label">Triggered</span>
                       <span className="emg-hist-value mono">{displayTime ? fmtTime(displayTime) : '—'}</span>
                     </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">SMS Status</span>
+                      <span className={`emg-hist-value ${
+                        ev.sms_status === 'SMS_FAILED' ? 'txt-red' :
+                        ev.sms_status === 'SMS_DELIVERED' ? 'txt-green' : 'txt-blue'
+                      }`} style={{ fontWeight: 600 }}>
+                        {ev.sms_status ? ev.sms_status.replace('SMS_', '') : 'SENT'}
+                      </span>
+                    </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Response Status</span>
+                      <span className={`emg-hist-value ${
+                        ev.assistance_response_status === 'ACCEPTED' ? 'txt-green' :
+                        ev.assistance_response_status === 'REJECTED' ? 'txt-red' : 'txt-amber'
+                      }`} style={{ fontWeight: 600 }}>
+                        {ev.assistance_response_status || (ev.status === 'ASSISTANCE_RESPONDED' ? 'ACCEPTED' : 'PENDING')}
+                      </span>
+                    </div>
+
+                    {ev.assistance_phone_number && (
+                      <div className="emg-hist-field">
+                        <span className="emg-hist-label">Assistance Phone</span>
+                        <span className="emg-hist-value mono">{ev.assistance_phone_number}</span>
+                      </div>
+                    )}
                   </div>
 
                   {ev.response_message && (
@@ -1539,8 +1588,23 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
               } : prev
             );
           } else if (t === 'ASSISTANCE_RESPONSE') {
-            setActiveEmergency(null);
+            setActiveEmergency((prev) =>
+              prev ? {
+                ...prev,
+                status: 'ASSISTANCE_RESPONDED',
+                assistance_response_status: (msg.response_status || (msg.status === 'REJECTED' ? 'REJECTED' : 'ACCEPTED')) as EmergencyStatus,
+                response_message: msg.message || 'Highway assistance team has responded.',
+                responded_at: msg.responded_at || new Date().toISOString(),
+              } : prev
+            );
             window.dispatchEvent(new Event('emergency_updated'));
+          } else if (t === 'SMS_STATUS_UPDATE') {
+            setActiveEmergency((prev) =>
+              prev && prev.emergency_id === msg.emergency_id ? {
+                ...prev,
+                sms_status: msg.sms_status,
+              } : prev
+            );
           } else if (t === 'EMERGENCY_CANCELLED') {
             setActiveEmergency((prev) =>
               prev ? {
@@ -1623,8 +1687,23 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
             setMicrosleepCount(data.microsleep_count ?? 0);
             window.dispatchEvent(new Event('emergency_updated'));
           } else if (data.type === 'ASSISTANCE_RESPONSE') {
-            setActiveEmergency(null);
+            setActiveEmergency((prev) =>
+              prev ? {
+                ...prev,
+                status: 'ASSISTANCE_RESPONDED',
+                assistance_response_status: (data.response_status || (data.status === 'REJECTED' ? 'REJECTED' : 'ACCEPTED')) as EmergencyStatus,
+                response_message: data.message || 'Highway assistance team has responded.',
+                responded_at: data.responded_at || new Date().toISOString(),
+              } : prev
+            );
             window.dispatchEvent(new Event('emergency_updated'));
+          } else if (data.type === 'SMS_STATUS_UPDATE') {
+            setActiveEmergency((prev) =>
+              prev && prev.emergency_id === data.emergency_id ? {
+                ...prev,
+                sms_status: data.sms_status,
+              } : prev
+            );
           } else if (data.type === 'DRIVER_RECOVERED') {
             setActiveEmergency((prev) =>
               prev ? { ...prev, status: 'DRIVER_RECOVERED', drowsiness_percentage: data.drowsiness_percentage ?? prev.drowsiness_percentage } : prev

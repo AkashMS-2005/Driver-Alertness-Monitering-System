@@ -9,6 +9,7 @@ from app.models.location import Location
 from app.models.highway_assistance import HighwayAssistance
 from app.models.emergency_event import EmergencyEvent
 from app.models.ai_connection_state import AIConnectionState
+from app.models.emergency_sms_log import EmergencySmsLog
 
 __all__ = [
     "Owner",
@@ -20,4 +21,6 @@ __all__ = [
     "HighwayAssistance",
     "EmergencyEvent",
     "AIConnectionState",
+    "EmergencySmsLog",
 ]
+

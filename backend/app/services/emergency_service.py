@@ -13,6 +13,7 @@ Broadcast event types:
   EMERGENCY_RESOLVED       — fully resolved
 """
 
+import asyncio
 import math
 import logging
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from sqlalchemy import select
 
 from app.models.emergency_event import EmergencyEvent
 from app.models.highway_assistance import HighwayAssistance
+from app.models.emergency_sms_log import EmergencySmsLog
 from app.models.location import Location
 from app.models.vehicle import Vehicle
 from app.models.owner import Owner
@@ -252,6 +254,13 @@ class _EmergencyService:
         except Exception as exc:
             logger.error(f"Failed to broadcast EMERGENCY_TRIGGERED: {exc}")
 
+        # Automatically dispatch emergency SMS alert to configured highway assistance
+        try:
+            from app.services.sms_service import sms_service
+            asyncio.create_task(sms_service.send_emergency_alert(emergency.id))
+        except Exception as sms_exc:
+            logger.error(f"[SMS] Failed to schedule emergency SMS dispatch: {sms_exc}")
+
         logger.warning(
             f"AUTO EMERGENCY TRIGGERED — id={emergency.id} "
             f"vehicle={vehicle_id} microsleeps={microsleep_count} "
@@ -453,6 +462,15 @@ class _EmergencyService:
         )
         assist = assist_res.scalar_one_or_none()
 
+        # Get latest SMS log if exists
+        sms_res = await db.execute(
+            select(EmergencySmsLog)
+            .where(EmergencySmsLog.emergency_id == emergency.id)
+            .order_by(EmergencySmsLog.sent_at.desc())
+            .limit(1)
+        )
+        sms_log = sms_res.scalar_one_or_none()
+
         return {
             "type": "EMERGENCY_TRIGGERED",
             "emergency_id": emergency.id,
@@ -468,10 +486,14 @@ class _EmergencyService:
             "assistance_name": assist.assistance_name if assist else None,
             "assistance_distance_km": assist.distance_km if assist else None,
             "triggered_at": emergency.triggered_at.isoformat() if emergency.triggered_at else None,
-            "response_message": emergency.response_message,
-            "responded_at": emergency.responded_at.isoformat() if emergency.responded_at else None,
+            "response_message": (sms_log.assistance_response_message if sms_log and sms_log.assistance_response_message else None) or emergency.response_message,
+            "responded_at": (sms_log.assistance_responded_at.isoformat() if sms_log and sms_log.assistance_responded_at else None) or (emergency.responded_at.isoformat() if emergency.responded_at else None),
             "cancelled_at": emergency.cancelled_at.isoformat() if emergency.cancelled_at else None,
             "cancelled_reason": emergency.cancelled_reason,
+            "sms_status": sms_log.sms_status if sms_log else None,
+            "sms_sent_at": sms_log.sent_at.isoformat() if (sms_log and sms_log.sent_at) else None,
+            "assistance_response_status": sms_log.assistance_response_status if sms_log else None,
+            "assistance_phone_number": sms_log.assistance_phone_number if sms_log else None,
         }
 
 

@@ -70,6 +70,16 @@ class Settings:
         os.getenv("RECOVERY_CONFIRMATION_SECONDS", "10")
     )
 
+    # SMS / Highway Assistance Communication (Twilio)
+    TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+    TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+    TWILIO_PHONE_NUMBER: str = os.getenv("TWILIO_PHONE_NUMBER", "")
+    TOLL_ASSISTANCE_PHONE_NUMBER: str = os.getenv("TOLL_ASSISTANCE_PHONE_NUMBER", "")
+    TWILIO_STATUS_CALLBACK_URL: str = os.getenv("TWILIO_STATUS_CALLBACK_URL", "")
+    TWILIO_WEBHOOK_VALIDATE_SIGNATURE: bool = (
+        os.getenv("TWILIO_WEBHOOK_VALIDATE_SIGNATURE", "false").lower() == "true"
+    )
+
     @property
     def ai_ws_url(self) -> str:
         """Full WebSocket URL to connect to the AI service on Laptop 1."""

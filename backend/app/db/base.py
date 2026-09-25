@@ -9,3 +9,4 @@ from app.models.alert import Alert  # noqa: F401
 from app.models.location import Location  # noqa: F401
 from app.models.highway_assistance import HighwayAssistance  # noqa: F401
 from app.models.emergency_event import EmergencyEvent  # noqa: F401
+from app.models.emergency_sms_log import EmergencySmsLog  # noqa: F401

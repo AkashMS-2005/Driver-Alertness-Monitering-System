@@ -12,6 +12,7 @@ Endpoints:
 """
 
 import math
+import asyncio
 import logging
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -21,6 +22,7 @@ from pydantic import BaseModel
 from app.db.database import get_db
 from app.models.emergency_event import EmergencyEvent
 from app.models.highway_assistance import HighwayAssistance
+from app.models.emergency_sms_log import EmergencySmsLog
 from app.models.location import Location
 from app.models.vehicle import Vehicle
 from app.models.owner import Owner
@@ -243,6 +245,28 @@ async def get_all_emergency_history(
                 ev_dict["assistance_distance_km"] = assist.distance_km
         except Exception:
             pass
+
+        # Fetch latest SMS status and reply info
+        try:
+            sms_res = await db.execute(
+                sa_select(EmergencySmsLog)
+                .where(EmergencySmsLog.emergency_id == ev.id)
+                .order_by(EmergencySmsLog.sent_at.desc())
+                .limit(1)
+            )
+            sms_log = sms_res.scalar_one_or_none()
+            if sms_log:
+                ev_dict["sms_status"] = sms_log.sms_status
+                ev_dict["sms_sent_at"] = sms_log.sent_at.isoformat() if sms_log.sent_at else None
+                ev_dict["assistance_phone_number"] = sms_log.assistance_phone_number
+                ev_dict["assistance_response_status"] = sms_log.assistance_response_status
+                if sms_log.assistance_response_message:
+                    ev_dict["response_message"] = sms_log.assistance_response_message
+                if sms_log.assistance_responded_at:
+                    ev_dict["responded_at"] = sms_log.assistance_responded_at.isoformat()
+        except Exception:
+            pass
+
         enriched.append(ev_dict)
 
     return enriched
@@ -509,13 +533,12 @@ async def trigger_emergency(
     except Exception as exc:
         logger.error(f"Failed to send owner notification: {exc}")
 
-    # NOTE: NOTIFICATION_SERVICE_NOTE
-    # To enable SMS notifications, configure the following in backend/.env:
-    #   TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    #   TWILIO_AUTH_TOKEN=your_auth_token
-    #   TWILIO_FROM_NUMBER=+1xxxxxxxxxx
-    # Then call: await sms_service.send_emergency_sms(owner.phone, notification_text)
-    # The abstraction is in app/services/notification_service.py
+    # Dispatch SMS to configured toll/highway assistance
+    try:
+        from app.services.sms_service import sms_service
+        asyncio.create_task(sms_service.send_emergency_alert(emergency.id))
+    except Exception as sms_exc:
+        logger.error(f"[SMS] Failed to trigger SMS dispatch for manual emergency: {sms_exc}")
 
     return EmergencyTriggerResponse(
         emergency_id=emergency.id,

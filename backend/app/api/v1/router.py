@@ -11,6 +11,7 @@ from app.api.v1 import (
     ai_connection_routes,
     location_routes,
     dashboard_routes,
+    twilio_routes,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -28,3 +29,6 @@ api_router.include_router(
 api_router.include_router(ai_connection_routes.router, prefix="/ai", tags=["AI Connection"])
 api_router.include_router(location_routes.router, prefix="/locations", tags=["Location"])
 api_router.include_router(dashboard_routes.router, prefix="/dashboard", tags=["Dashboard"])
+api_router.include_router(
+    twilio_routes.router, prefix="/webhooks/twilio", tags=["Twilio Webhooks"]
+)
