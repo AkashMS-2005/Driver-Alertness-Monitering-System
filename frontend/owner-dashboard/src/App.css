@@ -1392,3 +1392,101 @@ html, body, #root {
   }
 }
 
+/* ── Emergency History Cards (Part 13) ────────────────────────── */
+.emergency-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 20px 24px;
+}
+
+.emergency-history-card {
+  background: #111720;
+  border: 1px solid #232c3b;
+  border-radius: 12px;
+  padding: 18px 20px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.emergency-history-card:hover {
+  border-color: #388bfd;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.emg-hist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #1c2430;
+}
+
+.emg-hist-id-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.emg-hist-badge-icon {
+  font-size: 16px;
+}
+
+.emg-hist-id {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f0f6fc;
+  font-family: 'JetBrains Mono', monospace;
+  letter-spacing: 0.5px;
+}
+
+.emg-hist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px 18px;
+  margin-bottom: 14px;
+}
+
+.emg-hist-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.emg-hist-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #7d8590;
+  letter-spacing: 0.05em;
+}
+
+.emg-hist-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: #e6edf3;
+}
+
+.emg-hist-response-box {
+  background: rgba(56, 139, 253, 0.08);
+  border: 1px solid rgba(56, 139, 253, 0.25);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-top: 10px;
+}
+
+.emg-hist-response-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.emg-hist-response-msg {
+  font-size: 13px;
+  color: #c9d1d9;
+  line-height: 1.5;
+  font-style: italic;
+  margin: 0;
+}
+

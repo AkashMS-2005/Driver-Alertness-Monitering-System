@@ -177,6 +177,37 @@ class SafetyStateMachine:
             "recent_events": self.get_recent_events(limit=10),
         }
 
+    async def _resolve_vehicle_trip_ids(self) -> tuple[str, str]:
+        """Dynamically resolve real DB vehicle and trip IDs if still using defaults."""
+        global _active_vehicle_id, _active_trip_id
+        if _active_vehicle_id != "vehicle-1" and _active_trip_id != "trip-active-1":
+            return _active_vehicle_id, _active_trip_id
+        try:
+            from app.db.database import async_session
+            from sqlalchemy import select
+            from app.models.vehicle import Vehicle
+            from app.models.trip import Trip
+
+            async with async_session() as session:
+                veh_res = await session.execute(select(Vehicle).limit(1))
+                veh = veh_res.scalar_one_or_none()
+                if veh:
+                    _active_vehicle_id = veh.id
+                    trip_res = await session.execute(
+                        select(Trip).where(Trip.vehicle_id == veh.id, Trip.status == "ACTIVE").limit(1)
+                    )
+                    trip = trip_res.scalar_one_or_none()
+                    if not trip:
+                        trip_res = await session.execute(
+                            select(Trip).where(Trip.vehicle_id == veh.id).order_by(Trip.created_at.desc()).limit(1)
+                        )
+                        trip = trip_res.scalar_one_or_none()
+                    if trip:
+                        _active_trip_id = trip.id
+        except Exception as e:
+            logger.debug(f"Could not auto-resolve vehicle/trip: {e}")
+        return _active_vehicle_id, _active_trip_id
+
     async def _run_emergency_engine(
         self, state: str, drowsiness_pct: float,
         alertness_score: int = 100, head_state: str = "NORMAL"
@@ -184,11 +215,12 @@ class SafetyStateMachine:
         """Non-blocking delegation to the EmergencyEngine."""
         try:
             from app.risk_engine.emergency_engine import emergency_engine
+            vid, tid = await self._resolve_vehicle_trip_ids()
             await emergency_engine.on_ai_event(
                 state=state,
                 drowsiness_percentage=drowsiness_pct,
-                vehicle_id=_active_vehicle_id,
-                trip_id=_active_trip_id,
+                vehicle_id=vid,
+                trip_id=tid,
                 alertness_score=alertness_score,
                 head_state=head_state,
             )

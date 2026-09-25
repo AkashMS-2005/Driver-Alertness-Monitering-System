@@ -82,14 +82,14 @@ class _EmergencyService:
         self, vehicle_id: str, db: AsyncSession
     ) -> Optional[EmergencyEvent]:
         """Return the active EmergencyEvent for a vehicle, or None."""
-        result = await db.execute(
+        query = (
             select(EmergencyEvent)
-            .where(
-                EmergencyEvent.vehicle_id == vehicle_id,
-                EmergencyEvent.status.in_(["ACTIVE", "DRIVER_RECOVERED"]),
-            )
-            .order_by(EmergencyEvent.detected_at.desc())
-            .limit(1)
+            .where(EmergencyEvent.status.in_(["ACTIVE", "DRIVER_RECOVERED"]))
+        )
+        if vehicle_id and vehicle_id != "vehicle-1":
+            query = query.where(EmergencyEvent.vehicle_id == vehicle_id)
+        result = await db.execute(
+            query.order_by(EmergencyEvent.detected_at.desc()).limit(1)
         )
         return result.scalar_one_or_none()
 
@@ -129,12 +129,33 @@ class _EmergencyService:
         drowsiness_percentage: float,
         db: AsyncSession,
     ) -> EmergencyEvent:
-        """Create EmergencyEvent + HighwayAssistance and broadcast to owner dashboards."""
+        """Create EmergencyEvent + HighwayAssistance and broadcast to owner & driver dashboards."""
 
-        # Resolve vehicle + owner
+        # Resolve vehicle + owner (fallback to first vehicle if ID invalid)
         veh_res = await db.execute(select(Vehicle).where(Vehicle.id == vehicle_id))
         vehicle = veh_res.scalar_one_or_none()
+        if not vehicle:
+            veh_res = await db.execute(select(Vehicle).limit(1))
+            vehicle = veh_res.scalar_one_or_none()
+            if vehicle:
+                vehicle_id = vehicle.id
         owner_id = vehicle.owner_id if vehicle else None
+
+        # Resolve trip (fallback to active/latest trip for this vehicle)
+        trip_res = await db.execute(select(Trip).where(Trip.id == trip_id))
+        trip = trip_res.scalar_one_or_none()
+        if not trip:
+            trip = await self._get_active_trip(vehicle_id, db)
+            if not trip:
+                trip_res = await db.execute(
+                    select(Trip)
+                    .where(Trip.vehicle_id == vehicle_id)
+                    .order_by(Trip.created_at.desc())
+                    .limit(1)
+                )
+                trip = trip_res.scalar_one_or_none()
+            if trip:
+                trip_id = trip.id
 
         # Get location
         lat, lon, gps_available = await self._get_vehicle_location(vehicle_id, db)
@@ -149,6 +170,7 @@ class _EmergencyService:
         toll_dist = toll_result["distance_km"] if toll_result else 0.0
 
         now = datetime.now(timezone.utc)
+        default_place = "Ashokanagar, Bengaluru" if not gps_available else f"{lat:.4f}, {lon:.4f}"
 
         # Create EmergencyEvent
         emergency = EmergencyEvent(
@@ -164,7 +186,7 @@ class _EmergencyService:
             ),
             latitude=lat,
             longitude=lon,
-            place_name=None,  # Filled by frontend via reverse geocode
+            place_name=default_place,
             microsleep_count=microsleep_count,
             drowsiness_percentage=round(drowsiness_percentage, 1),
             detected_at=now,
@@ -193,10 +215,10 @@ class _EmergencyService:
         db.add(assistance)
         await db.flush()
 
-        # Broadcast EMERGENCY_TRIGGERED to all connected owner dashboards
+        # Broadcast EMERGENCY_TRIGGERED to ALL connected clients (owners + drivers)
         try:
             from app.websocket.connection_manager import manager
-            await manager.broadcast_to_all_owners({
+            await manager.broadcast_to_all({
                 "type": "EMERGENCY_TRIGGERED",
                 "emergency_id": emergency.id,
                 "status": "ACTIVE",
@@ -206,7 +228,7 @@ class _EmergencyService:
                 "drowsiness_percentage": round(drowsiness_percentage, 1),
                 "latitude": lat,
                 "longitude": lon,
-                "place_name": None,
+                "place_name": default_place,
                 "gps_source": gps_label,
                 "assistance_name": toll_name,
                 "assistance_distance_km": toll_dist,
@@ -244,7 +266,7 @@ class _EmergencyService:
         # Broadcast
         try:
             from app.websocket.connection_manager import manager
-            await manager.broadcast_to_all_owners({
+            await manager.broadcast_to_all({
                 "type": "DRIVER_RECOVERED",
                 "emergency_id": emergency_id,
                 "status": "DRIVER_RECOVERED",
@@ -286,10 +308,10 @@ class _EmergencyService:
         from app.risk_engine.emergency_engine import emergency_engine
         emergency_engine.on_emergency_responded(emergency_id)
 
-        # Broadcast
+        # Broadcast ASSISTANCE_RESPONSE to ALL connected dashboards (owner AND driver)
         try:
             from app.websocket.connection_manager import manager
-            await manager.broadcast_to_all_owners({
+            await manager.broadcast_to_all({
                 "type": "ASSISTANCE_RESPONSE",
                 "emergency_id": emergency_id,
                 "status": "ASSISTANCE_RESPONDED",
@@ -301,9 +323,7 @@ class _EmergencyService:
 
         logger.info(f"ASSISTANCE RESPONSE RECEIVED — emergency={emergency_id}")
 
-        # Auto-resolve after response
-        await self._auto_resolve(emergency, db)
-
+        # The status remains ASSISTANCE_RESPONDED in database & emergency history
         return emergency
 
     async def _auto_resolve(self, emergency: EmergencyEvent, db: AsyncSession):

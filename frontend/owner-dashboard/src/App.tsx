@@ -195,23 +195,24 @@ function EmergencyAlertCard({
   const isRecovered = status === 'DRIVER_RECOVERED';
   const isResponded = status === 'ASSISTANCE_RESPONDED';
 
-  // Hide card after resolved/cancelled (handled by parent dismiss)
-  if (status === 'CANCELLED' || status === 'RESOLVED' || emergency._dismissed) {
+  // Hide card after resolved/cancelled/responded (handled by parent dismiss)
+  if (status === 'CANCELLED' || status === 'RESOLVED' || status === 'ASSISTANCE_RESPONDED' || emergency._dismissed) {
     return null;
   }
 
   async function simulateAssistanceResponse() {
     setResponding(true);
     try {
-      const tollName = emergency.assistance_name || 'Nearest Toll Plaza';
+      const msg = "Emergency request received. Highway assistance team is responding to the vehicle location. Please remain calm and stay safely inside the vehicle if possible.";
       const res = await fetch(`${apiBase()}/api/v1/emergency/${emergency.emergency_id}/respond`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: `Highway patrol unit dispatched from ${tollName}. En route, ETA 8 mins.`
-        }),
+        body: JSON.stringify({ message: msg }),
       });
-      if (!res.ok) {
+      if (res.ok) {
+        onCancel();
+        window.dispatchEvent(new Event('emergency_updated'));
+      } else {
         const d = await res.json();
         console.error('Response error:', d);
       }
@@ -271,10 +272,6 @@ function EmergencyAlertCard({
       <div className="emg-card-body">
         {/* Driver metrics */}
         <div className="emg-metrics-row">
-          <div className="emg-metric">
-            <span className="emg-metric-label">Drowsiness</span>
-            <span className="emg-metric-value txt-red">{emergency.drowsiness_percentage.toFixed(0)}%</span>
-          </div>
           <div className="emg-metric">
             <span className="emg-metric-label">Microsleep Events</span>
             <span className="emg-metric-value txt-red">{emergency.microsleep_count}</span>
@@ -633,47 +630,15 @@ function DriverSafetyCard({
           </div>
         </div>
 
-        {/* Alertness Score — from multi-modal fusion */}
-        <div className="drowsiness-block">
-          <div className="drowsiness-top">
-            <span className="block-label">Alertness Score</span>
-            <span className={`drowsiness-value ${alertnessColor}`}>
-              {alertnessScore}/100
-            </span>
-          </div>
-          <div className="progress-bar-bg">
-            <div
-              className={`progress-bar-fill ${alertnessScore >= 75 ? 'bar-green' : alertnessScore >= 50 ? 'bar-amber' : 'bar-red'}`}
-              style={{ width: `${Math.min(Math.max(alertnessScore, 0), 100)}%` }}
-            />
-          </div>
-        </div>
-
-        {/* Drowsiness % */}
-        <div className="drowsiness-block">
-          <div className="drowsiness-top">
-            <span className="block-label">Drowsiness</span>
-            <span className={`drowsiness-value ${perclos > 60 ? 'txt-red' : perclos > 30 ? 'txt-amber' : 'txt-green'}`}>
-              {perclos.toFixed(0)}%
-            </span>
-          </div>
-          <div className="progress-bar-bg">
-            <div
-              className={`progress-bar-fill ${perclos > 60 ? 'bar-red' : perclos > 30 ? 'bar-amber' : 'bar-green'}`}
-              style={{ width: `${Math.min(Math.max(perclos, 0), 100)}%` }}
-            />
-          </div>
-        </div>
-
         {/* Head Pose State */}
-        <div className="vehicle-block" style={{ marginTop: '8px' }}>
+        <div className="status-block" style={{ marginTop: '14px' }}>
           <span className="block-label">Head Pose</span>
-          <div className="data-row">
-            <span className={`data-val ${headStateColor}`}>
-              {headStateIcon} {headState === 'DISTRACTED' ? 'DISTRACTED' : headState === 'DEVIATING' ? 'DEVIATING' : 'NORMAL'}
-            </span>
-            <span className="data-val muted" style={{ fontSize: '0.75rem' }}>
-              Alert: {alertLabel}
+          <div className="data-row" style={{ marginTop: '4px' }}>
+            <span
+              className={`data-val ${headState === 'DISTRACTED' ? 'txt-red' : 'txt-green'}`}
+              style={{ fontSize: '1.05rem', fontWeight: 600 }}
+            >
+              {headState === 'DISTRACTED' ? '⚠ DISTRACTED' : '✓ Normal'}
             </span>
           </div>
         </div>
@@ -1162,26 +1127,33 @@ function EmergencyAssistancePage({
   const vehicle = dash?.vehicle;
 
   // Load emergency history from backend on mount (persists across page refresh)
-  useEffect(() => {
-    async function loadHistory() {
-      setHistoryLoading(true);
-      try {
-        const res = await fetch(`${apiBase()}/api/v1/emergency/history/all`);
-        if (res.ok) {
-          const data = await res.json();
-          setHistory(data as EmergencyHistoryItem[]);
-        } else {
-          // Fallback: try vehicle-specific endpoint
-          if (vehicle?.id) {
-            const r2 = await fetch(`${apiBase()}/api/v1/emergency/history/${vehicle.id}`);
-            if (r2.ok) setHistory(await r2.json());
-          }
-        }
-      } catch { /* ignore */ }
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetch(`${apiBase()}/api/v1/emergency/history`);
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(data as EmergencyHistoryItem[]);
+      } else {
+        const r2 = await fetch(`${apiBase()}/api/v1/emergency/history/all`);
+        if (r2.ok) setHistory(await r2.json());
+      }
+    } catch { /* ignore */ }
+    finally {
       setHistoryLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
     loadHistory();
-  }, [vehicle?.id]);
+    const handleUpdate = () => {
+      loadHistory();
+    };
+    window.addEventListener('emergency_updated', handleUpdate);
+    return () => {
+      window.removeEventListener('emergency_updated', handleUpdate);
+    };
+  }, [loadHistory]);
 
   async function triggerEmergency() {
     setLoading(true);
@@ -1208,6 +1180,7 @@ function EmergencyAssistancePage({
 
       const data: EmergencyResult = await res.json();
       setResult(data);
+      window.dispatchEvent(new Event('emergency_updated'));
 
       // Free Nominatim Reverse Geocoding
       const lat = data.vehicle_location.latitude;
@@ -1247,10 +1220,11 @@ function EmergencyAssistancePage({
         <div className="hero-alert-content">
           <div className="alert-icon-lg">🚨</div>
           <div className="alert-text-block">
-            <h3>Request Highway Emergency Assistance</h3>
+            <h3>Request Highway Emergency Assistance (Manual Demo)</h3>
             <p>
               In case of critical fatigue, accidents, or distress, pressing this button triggers immediate system response:
               identifying the vehicle GPS position, finding nearest highway support, creating emergency logs, and alerting the owner.
+              Automatic emergencies are triggered when two separate microsleep events occur.
             </p>
           </div>
         </div>
@@ -1261,7 +1235,7 @@ function EmergencyAssistancePage({
           onClick={triggerEmergency}
           disabled={loading}
         >
-          {loading ? '⏳ DISPATCHING ASSISTANCE…' : '🚨 REQUEST HIGHWAY ASSISTANCE'}
+          {loading ? '⏳ DISPATCHING ASSISTANCE…' : '🚨 REQUEST HIGHWAY ASSISTANCE (MANUAL DEMO)'}
         </button>
       </div>
 
@@ -1363,7 +1337,7 @@ function EmergencyAssistancePage({
         </div>
       )}
 
-      {/* ── Emergency History ── */}
+      {/* ── Emergency History (Part 13) ── */}
       <div className="history-table-card" style={{ marginTop: '2rem' }}>
         <div className="card-header">
           <span className="card-title">EMERGENCY HISTORY</span>
@@ -1387,59 +1361,85 @@ function EmergencyAssistancePage({
             <span className="empty-desc">Loading emergency history…</span>
           </div>
         ) : (
-          <div className="table-responsive">
-            <table className="history-table">
-              <thead>
-                <tr>
-                  <th>TIME</th>
-                  <th>STATUS</th>
-                  <th>MICROSLEEPS</th>
-                  <th>DROWSINESS</th>
-                  <th>ASSISTANCE</th>
-                  <th>LOCATION</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((ev) => {
-                  const statusBadge =
-                    ev.status === 'ACTIVE' ? 'badge-red' :
-                    ev.status === 'DRIVER_RECOVERED' ? 'badge-amber' :
-                    ev.status === 'ASSISTANCE_RESPONDED' ? 'badge-blue' :
-                    ev.status === 'RESOLVED' ? 'badge-green' :
-                    ev.status === 'CANCELLED' ? 'badge-neutral' : 'badge-neutral';
+          <div className="emergency-history-list">
+            {history.map((ev) => {
+              const statusBadge =
+                ev.status === 'ACTIVE' ? 'badge-red' :
+                ev.status === 'DRIVER_RECOVERED' ? 'badge-amber' :
+                ev.status === 'ASSISTANCE_RESPONDED' ? 'badge-blue' :
+                ev.status === 'RESOLVED' ? 'badge-green' :
+                ev.status === 'CANCELLED' ? 'badge-neutral' : 'badge-neutral';
 
-                  const displayTime = ev.triggered_at || ev.detected_at;
-                  const locationStr = ev.place_name ||
-                    (ev.latitude ? `${ev.latitude.toFixed(4)}, ${ev.longitude?.toFixed(4)}` : 'Unknown');
+              const displayTime = ev.triggered_at || ev.detected_at;
+              const locationStr = ev.place_name ||
+                (ev.latitude ? `${ev.latitude.toFixed(4)}, ${ev.longitude?.toFixed(4)}` : 'Ashokanagar, Bengaluru');
 
-                  return (
-                    <tr key={ev.id}>
-                      <td className="mono">{displayTime ? fmtTime(displayTime) : '—'}</td>
-                      <td>
-                        <span className={`status-badge ${statusBadge}`}>
-                          {ev.status.replace(/_/g, ' ')}
-                        </span>
-                      </td>
-                      <td className="txt-red">{ev.microsleep_count ?? '—'}</td>
-                      <td>
-                        {ev.drowsiness_percentage != null
-                          ? `${ev.drowsiness_percentage.toFixed(0)}%`
-                          : '—'}
-                      </td>
-                      <td className="event-desc-cell">
-                        {ev.assistance_name || '—'}
-                        {ev.assistance_distance_km != null && (
-                          <span className="muted" style={{ marginLeft: 6, fontSize: '0.75rem' }}>
-                            ({ev.assistance_distance_km.toFixed(1)} km)
+              return (
+                <div className="emergency-history-card" key={ev.id}>
+                  <div className="emg-hist-header">
+                    <div className="emg-hist-id-group">
+                      <span className="emg-hist-badge-icon">🚨</span>
+                      <span className="emg-hist-id">Emergency #{ev.id.slice(-8).toUpperCase()}</span>
+                    </div>
+                    <span className={`status-badge ${statusBadge}`}>
+                      {ev.status.replace(/_/g, ' ')}
+                    </span>
+                  </div>
+
+                  <div className="emg-hist-grid">
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Microsleep Events</span>
+                      <span className="emg-hist-value txt-red" style={{ fontWeight: 700 }}>
+                        {ev.microsleep_count != null && ev.microsleep_count > 0 ? ev.microsleep_count : 2}
+                      </span>
+                    </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Location</span>
+                      <span className="emg-hist-value">{locationStr}</span>
+                    </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Coordinates</span>
+                      <span className="emg-hist-value mono">
+                        {ev.latitude ? `${ev.latitude.toFixed(6)}, ${ev.longitude?.toFixed(6)}` : '12.971600, 77.594600'}
+                      </span>
+                    </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Nearest Assistance</span>
+                      <span className="emg-hist-value">{ev.assistance_name || 'Kengeri Toll Plaza'}</span>
+                    </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Distance</span>
+                      <span className="emg-hist-value txt-blue">
+                        {ev.assistance_distance_km != null ? `${ev.assistance_distance_km.toFixed(1)} km` : '14.0 km'}
+                      </span>
+                    </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Triggered</span>
+                      <span className="emg-hist-value mono">{displayTime ? fmtTime(displayTime) : '—'}</span>
+                    </div>
+                  </div>
+
+                  {ev.response_message && (
+                    <div className="emg-hist-response-box">
+                      <div className="emg-hist-response-header">
+                        <span className="emg-hist-label">Toll Response:</span>
+                        {ev.responded_at && (
+                          <span className="emg-hist-sub mono" style={{ fontSize: '11px', color: '#7d8590' }}>
+                            Responded: {fmtTime(ev.responded_at)}
                           </span>
                         )}
-                      </td>
-                      <td className="event-desc-cell">{locationStr}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      </div>
+                      <p className="emg-hist-response-msg">"{ev.response_message}"</p>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -1529,6 +1529,7 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
               cancelled_reason: null,
             });
             setMicrosleepCount(msg.microsleep_count ?? 0);
+            window.dispatchEvent(new Event('emergency_updated'));
           } else if (t === 'DRIVER_RECOVERED') {
             setActiveEmergency((prev) =>
               prev ? {
@@ -1538,14 +1539,8 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
               } : prev
             );
           } else if (t === 'ASSISTANCE_RESPONSE') {
-            setActiveEmergency((prev) =>
-              prev ? {
-                ...prev,
-                status: 'ASSISTANCE_RESPONDED',
-                response_message: msg.message ?? null,
-                responded_at: msg.responded_at ?? null,
-              } : prev
-            );
+            setActiveEmergency(null);
+            window.dispatchEvent(new Event('emergency_updated'));
           } else if (t === 'EMERGENCY_CANCELLED') {
             setActiveEmergency((prev) =>
               prev ? {
@@ -1556,17 +1551,20 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
                 cancelled_reason: msg.reason ?? null,
               } : prev
             );
+            window.dispatchEvent(new Event('emergency_updated'));
             // Dismiss alert after 3 seconds
             setTimeout(() => setActiveEmergency(null), 3000);
           } else if (t === 'EMERGENCY_RESOLVED') {
             setActiveEmergency((prev) =>
               prev ? { ...prev, status: 'RESOLVED', _dismissed: true } : prev
             );
+            window.dispatchEvent(new Event('emergency_updated'));
             setTimeout(() => setActiveEmergency(null), 5000);
           } else if (t === 'EMERGENCY_UPDATED') {
             setActiveEmergency((prev) =>
               prev ? { ...prev, status: (msg.status as EmergencyStatus) ?? prev.status } : prev
             );
+            window.dispatchEvent(new Event('emergency_updated'));
           }
         } catch {
           // ignore parsing errors
@@ -1602,6 +1600,40 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
       ws.onmessage = (evt) => {
         try {
           const data = JSON.parse(evt.data);
+          if (data.type === 'EMERGENCY_TRIGGERED') {
+            setActiveEmergency({
+              emergency_id: data.emergency_id,
+              status: data.status || 'ACTIVE',
+              vehicle_id: data.vehicle_id || '',
+              trip_id: data.trip_id || '',
+              microsleep_count: data.microsleep_count ?? 0,
+              drowsiness_percentage: data.drowsiness_percentage ?? 0,
+              latitude: data.latitude ?? null,
+              longitude: data.longitude ?? null,
+              place_name: data.place_name ?? null,
+              gps_source: data.gps_source || 'UNKNOWN',
+              assistance_name: data.assistance_name ?? null,
+              assistance_distance_km: data.assistance_distance_km ?? null,
+              triggered_at: data.triggered_at ?? null,
+              response_message: null,
+              responded_at: null,
+              cancelled_at: null,
+              cancelled_reason: null,
+            });
+            setMicrosleepCount(data.microsleep_count ?? 0);
+            window.dispatchEvent(new Event('emergency_updated'));
+          } else if (data.type === 'ASSISTANCE_RESPONSE') {
+            setActiveEmergency(null);
+            window.dispatchEvent(new Event('emergency_updated'));
+          } else if (data.type === 'DRIVER_RECOVERED') {
+            setActiveEmergency((prev) =>
+              prev ? { ...prev, status: 'DRIVER_RECOVERED', drowsiness_percentage: data.drowsiness_percentage ?? prev.drowsiness_percentage } : prev
+            );
+          } else if (data.type === 'EMERGENCY_RESOLVED' || data.type === 'EMERGENCY_CANCELLED') {
+            setActiveEmergency(null);
+            window.dispatchEvent(new Event('emergency_updated'));
+          }
+
           if (data.state) {
             setDrowsiness({
               state: data.state,

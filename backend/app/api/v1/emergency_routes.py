@@ -137,7 +137,10 @@ class EmergencyTriggerResponse(BaseModel):
 
 class AssistanceRespondRequest(BaseModel):
     """Payload for assistance response endpoint."""
-    message: str = "Highway assistance team is on the way."
+    message: str = (
+        "Emergency request received. Highway assistance team is responding to the vehicle location. "
+        "Please remain calm and stay safely inside the vehicle if possible."
+    )
 
 
 class CancelEmergencyRequest(BaseModel):
@@ -181,6 +184,7 @@ async def get_active_emergency(
     return {"active": True, "emergency": payload}
 
 
+@router.get("/history")
 @router.get("/history/all")
 async def get_all_emergency_history(
     limit: int = 100, db: AsyncSession = Depends(get_db)
@@ -204,6 +208,7 @@ async def get_all_emergency_history(
     for ev in events:
         ev_dict = {
             "id": ev.id,
+            "emergency_id": ev.id,
             "trip_id": ev.trip_id,
             "vehicle_id": ev.vehicle_id,
             "emergency_type": ev.emergency_type,
@@ -213,15 +218,15 @@ async def get_all_emergency_history(
             "latitude": ev.latitude,
             "longitude": ev.longitude,
             "place_name": ev.place_name,
-            "microsleep_count": ev.microsleep_count,
+            "microsleep_count": ev.microsleep_count if ev.microsleep_count is not None else 0,
             "drowsiness_percentage": ev.drowsiness_percentage,
-            "detected_at": ev.detected_at,
-            "triggered_at": ev.triggered_at,
+            "detected_at": ev.detected_at.isoformat() if ev.detected_at else None,
+            "triggered_at": ev.triggered_at.isoformat() if ev.triggered_at else None,
             "response_message": ev.response_message,
-            "responded_at": ev.responded_at,
-            "cancelled_at": ev.cancelled_at,
+            "responded_at": ev.responded_at.isoformat() if ev.responded_at else None,
+            "cancelled_at": ev.cancelled_at.isoformat() if ev.cancelled_at else None,
             "cancelled_reason": ev.cancelled_reason,
-            "resolved_at": ev.resolved_at,
+            "resolved_at": ev.resolved_at.isoformat() if ev.resolved_at else None,
             "assistance_name": None,
             "assistance_distance_km": None,
         }
@@ -265,16 +270,21 @@ async def respond_to_emergency(
     broadcasts ASSISTANCE_RESPONSE to all connected owner dashboards.
     """
     try:
+        msg = payload.message or (
+            "Emergency request received. Highway assistance team is responding to the vehicle location. "
+            "Please remain calm and stay safely inside the vehicle if possible."
+        )
         emergency = await emergency_service.respond_to_emergency(
             emergency_id=emergency_id,
-            message=payload.message,
+            message=msg,
             db=db,
         )
+        await db.commit()
         return {
             "success": True,
             "emergency_id": emergency.id,
             "status": emergency.status,
-            "message": payload.message,
+            "message": msg,
             "responded_at": emergency.responded_at.isoformat() if emergency.responded_at else None,
             "note": "[DEV] This is a development/mock response endpoint. No real toll operator was contacted.",
         }

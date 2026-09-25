@@ -190,30 +190,81 @@ def _rotation_matrix_to_euler(R: np.ndarray):
 # ---------------------------------------------------------------------------
 
 class HeadPoseTracker:
-    """Tracks head pose over time and detects sustained distraction.
+    """Tracks head pose over time with dead-zones, temporal smoothing,
+    neutral baseline calibration, and hysteresis.
+
+    Pipeline:
+      HEAD POSE -> MOVING AVERAGE SMOOTHING -> BASELINE SUBTRACTION (current - neutral)
+      -> DEAD-ZONE FILTERING -> HYSTERESIS CHECK -> TEMPORAL SUSTAINED DURATION
+      -> DECISION ("NORMAL" or "DISTRACTED")
 
     Handles:
-    - Short head movements (mirror glances, adjustments) → no alert
-    - Sustained head deviation beyond thresholds → distraction signal
-    - Sustained downward pitch (head drop) → fatigue signal
-
-    All thresholds are configurable via thresholds.yaml.
+    - Small head/face movements within deadzone treated as NORMAL.
+    - Quick mirror glances (0.5s - 1.2s) treated as NORMAL.
+    - Sustained head deviation beyond enter_threshold for >= deviation_min_duration
+      transitions to DISTRACTED.
+    - Hysteresis: requires staying below exit_threshold (enter > exit) for exit_duration
+      before returning to NORMAL.
     """
 
     def __init__(
         self,
-        pitch_threshold: float = 20.0,
-        yaw_threshold: float = 30.0,
-        roll_threshold: float = 20.0,
-        deviation_duration: float = 2.0,
-    ):
-        self.pitch_threshold = pitch_threshold
-        self.yaw_threshold = yaw_threshold
-        self.roll_threshold = roll_threshold
-        self.deviation_duration = deviation_duration
+        # Dead-zones (tolerance around neutral pose)
+        yaw_deadzone: float = 12.0,
+        pitch_deadzone: float = 10.0,
+        roll_deadzone: float = 10.0,
 
-        # Timing
+        # Hysteresis thresholds (degrees)
+        enter_yaw_threshold: float = 30.0,
+        exit_yaw_threshold: float = 18.0,
+        enter_pitch_threshold: float = 22.0,
+        exit_pitch_threshold: float = 14.0,
+        enter_roll_threshold: float = 22.0,
+        exit_roll_threshold: float = 14.0,
+
+        # Temporal durations (seconds)
+        deviation_min_duration: float = 2.0,
+        exit_duration: float = 0.8,
+
+        # Smoothing & Calibration
+        smoothing_window_frames: int = 8,
+        calibration_frames: int = 30,
+        **kwargs,
+    ):
+        # Support legacy argument names if passed
+        self.yaw_deadzone = float(kwargs.get("HEAD_POSE_YAW_DEADZONE", yaw_deadzone))
+        self.pitch_deadzone = float(kwargs.get("HEAD_POSE_PITCH_DEADZONE", pitch_deadzone))
+        self.roll_deadzone = float(kwargs.get("HEAD_POSE_ROLL_DEADZONE", roll_deadzone))
+
+        self.enter_yaw = float(kwargs.get("yaw_threshold", enter_yaw_threshold))
+        self.exit_yaw = float(exit_yaw_threshold)
+        self.enter_pitch = float(kwargs.get("pitch_threshold", enter_pitch_threshold))
+        self.exit_pitch = float(exit_pitch_threshold)
+        self.enter_roll = float(kwargs.get("roll_threshold", enter_roll_threshold))
+        self.exit_roll = float(exit_roll_threshold)
+
+        self.deviation_duration = float(kwargs.get("deviation_duration", deviation_min_duration))
+        self.exit_duration = float(exit_duration)
+
+        self.smoothing_frames = max(1, int(smoothing_window_frames))
+        self.calibration_target = max(5, int(calibration_frames))
+
+        # Smoothing window buffers
+        self._pitch_buf: list[float] = []
+        self._yaw_buf: list[float] = []
+        self._roll_buf: list[float] = []
+
+        # Neutral baseline pose
+        self._calib_count: int = 0
+        self._neutral_pitch: float = 0.0
+        self._neutral_yaw: float = 0.0
+        self._neutral_roll: float = 0.0
+        self._is_calibrated: bool = False
+
+        # State machine
         self._deviation_start: float | None = None
+        self._exit_start: float | None = None
+        self._is_distracted: bool = False
         self._is_deviated: bool = False
 
     def update(
@@ -226,62 +277,147 @@ class HeadPoseTracker:
         """Process one frame's head pose estimate.
 
         Args:
-            pitch, yaw, roll:  Head Euler angles in degrees.
-            valid:  False if head pose estimation failed this frame.
+            pitch, yaw, roll: Head Euler angles in degrees from solvePnP.
+            valid: False if solvePnP or face landmarks failed.
 
         Returns:
-            dict:
-                head_deviated        (bool)  — currently outside normal range
-                sustained_deviation  (bool)  — deviated for ≥ deviation_duration
-                deviation_duration   (float) — seconds of continuous deviation
-                head_pose_valid      (bool)  — whether this reading is reliable
-                head_state           (str)   — "NORMAL", "DEVIATING", "DISTRACTED"
+            dict containing:
+                head_state           (str)   - "NORMAL" or "DISTRACTED"
+                sustained_deviation  (bool)  - True if confirmed DISTRACTED
+                head_deviated        (bool)  - True if currently exceeding deadzone/threshold
+                deviation_duration   (float) - Continuous seconds beyond enter threshold
+                head_pose_valid      (bool)  - Reliable estimation flag
+                pitch, yaw, roll     (float) - Smoothed deviations relative to neutral
         """
         if not valid:
-            # Invalid reading — do not reset timer, do not advance distraction
             return {
                 "head_deviated": self._is_deviated,
-                "sustained_deviation": False,
+                "sustained_deviation": self._is_distracted,
                 "deviation_duration": 0.0,
                 "head_pose_valid": False,
-                "head_state": "UNKNOWN",
+                "head_state": "DISTRACTED" if self._is_distracted else "NORMAL",
+                "pitch": 0.0,
+                "yaw": 0.0,
+                "roll": 0.0,
             }
 
         now = time.monotonic()
 
-        deviated = (
-            abs(pitch) > self.pitch_threshold
-            or abs(yaw) > self.yaw_threshold
-            or abs(roll) > self.roll_threshold
-        )
+        # 1. Temporal Smoothing (moving average buffer)
+        self._pitch_buf.append(pitch)
+        self._yaw_buf.append(yaw)
+        self._roll_buf.append(roll)
+        if len(self._pitch_buf) > self.smoothing_frames:
+            self._pitch_buf.pop(0)
+            self._yaw_buf.pop(0)
+            self._roll_buf.pop(0)
 
-        if deviated:
-            if self._deviation_start is None:
-                self._deviation_start = now
-            elapsed = now - self._deviation_start
+        smooth_pitch = sum(self._pitch_buf) / len(self._pitch_buf)
+        smooth_yaw = sum(self._yaw_buf) / len(self._yaw_buf)
+        smooth_roll = sum(self._roll_buf) / len(self._roll_buf)
+
+        # 2. Neutral Driving Pose Calibration / Baseline
+        if not self._is_calibrated:
+            self._calib_count += 1
+            alpha = 1.0 / self._calib_count
+            self._neutral_pitch = (1.0 - alpha) * self._neutral_pitch + alpha * smooth_pitch
+            self._neutral_yaw = (1.0 - alpha) * self._neutral_yaw + alpha * smooth_yaw
+            self._neutral_roll = (1.0 - alpha) * self._neutral_roll + alpha * smooth_roll
+
+            if self._calib_count >= self.calibration_target:
+                self._is_calibrated = True
+                logger.info(
+                    f"Head Pose Baseline Calibrated: Pitch={self._neutral_pitch:.1f}°, "
+                    f"Yaw={self._neutral_yaw:.1f}°, Roll={self._neutral_roll:.1f}°"
+                )
+        elif not self._is_distracted:
+            # Slow running adaptive update (0.5% weight) to absorb gradual seat posture shifts
+            self._neutral_pitch = 0.995 * self._neutral_pitch + 0.005 * smooth_pitch
+            self._neutral_yaw = 0.995 * self._neutral_yaw + 0.005 * smooth_yaw
+            self._neutral_roll = 0.995 * self._neutral_roll + 0.005 * smooth_roll
+
+        # 3. Angle Deviation relative to neutral baseline
+        delta_pitch = smooth_pitch - self._neutral_pitch
+        delta_yaw = smooth_yaw - self._neutral_yaw
+        delta_roll = smooth_roll - self._neutral_roll
+
+        # 4. Dead-Zone Filtering
+        eff_pitch = 0.0 if abs(delta_pitch) <= self.pitch_deadzone else delta_pitch
+        eff_yaw = 0.0 if abs(delta_yaw) <= self.yaw_deadzone else delta_yaw
+        eff_roll = 0.0 if abs(delta_roll) <= self.roll_deadzone else delta_roll
+
+        # 5. Hysteresis & Temporal Duration State Machine
+        if not self._is_distracted:
+            # Check enter threshold
+            exceeded_enter = (
+                abs(eff_yaw) > self.enter_yaw
+                or abs(eff_pitch) > self.enter_pitch
+                or abs(eff_roll) > self.enter_roll
+            )
+
+            if exceeded_enter:
+                if self._deviation_start is None:
+                    self._deviation_start = now
+                elapsed = now - self._deviation_start
+
+                if elapsed >= self.deviation_duration:
+                    self._is_distracted = True
+                    self._exit_start = None
+                    logger.warning(
+                        f"[HeadPose] Sustained head distraction confirmed ({elapsed:.1f}s) — "
+                        f"Y={eff_yaw:.1f}° P={eff_pitch:.1f}° R={eff_roll:.1f}°"
+                    )
+            else:
+                self._deviation_start = None
+                elapsed = 0.0
+
+            self._is_deviated = exceeded_enter
+
         else:
-            self._deviation_start = None
-            elapsed = 0.0
+            # Currently in DISTRACTED state — check exit threshold (must be below exit for exit_duration)
+            below_exit = (
+                abs(eff_yaw) <= self.exit_yaw
+                and abs(eff_pitch) <= self.exit_pitch
+                and abs(eff_roll) <= self.exit_roll
+            )
 
-        self._is_deviated = deviated
-        sustained = deviated and elapsed >= self.deviation_duration
+            if below_exit:
+                if self._exit_start is None:
+                    self._exit_start = now
+                if now - self._exit_start >= self.exit_duration:
+                    self._is_distracted = False
+                    self._deviation_start = None
+                    self._exit_start = None
+                    self._is_deviated = False
+                    logger.info("[HeadPose] Driver head pose returned to normal range")
+            else:
+                self._exit_start = None
+                self._is_deviated = True
 
-        if sustained:
-            head_state = "DISTRACTED"
-        elif deviated:
-            head_state = "DEVIATING"
-        else:
-            head_state = "NORMAL"
+            elapsed = (now - self._deviation_start) if self._deviation_start else 0.0
+
+        # Consistent binary state for UI (never flickers with temporary DEVIATING status)
+        head_state = "DISTRACTED" if self._is_distracted else "NORMAL"
 
         return {
-            "head_deviated": deviated,
-            "sustained_deviation": sustained,
+            "head_deviated": self._is_deviated,
+            "sustained_deviation": self._is_distracted,
             "deviation_duration": round(elapsed, 2),
             "head_pose_valid": True,
             "head_state": head_state,
+            "pitch": round(delta_pitch, 2),
+            "yaw": round(delta_yaw, 2),
+            "roll": round(delta_roll, 2),
         }
 
     def reset(self):
-        """Reset tracker state (call on new session)."""
+        """Reset tracker state on new trip."""
         self._deviation_start = None
+        self._exit_start = None
+        self._is_distracted = False
         self._is_deviated = False
+        self._pitch_buf.clear()
+        self._yaw_buf.clear()
+        self._roll_buf.clear()
+        self._calib_count = 0
+        self._is_calibrated = False

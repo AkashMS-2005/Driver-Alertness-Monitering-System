@@ -314,21 +314,16 @@ class MultiModalFusion:
     ) -> float:
         """Compute head-pose risk [0, 1].
 
-        NORMAL      → 0.0
-        DEVIATING   → low risk (short movement)
-        DISTRACTED  → moderate to high risk (sustained deviation)
+        NORMAL      → 0.0 (including small movements within deadzone & mirror glances)
+        DISTRACTED  → moderate risk only when sustained (never saturates alone)
         """
-        if head_state == "NORMAL":
+        if head_state == "NORMAL" or not sustained_deviation:
             return 0.0
-        elif head_state == "DEVIATING":
-            return 0.2   # Transient deviation — monitor but don't escalate
         elif head_state == "DISTRACTED":
-            # Scale with duration beyond threshold
-            base_risk = 0.5
-            extra = min(0.5, deviation_duration / 10.0)
-            return min(1.0, base_risk + extra)
-        else:
-            return 0.0
+            base_risk = 0.35
+            extra = min(0.15, deviation_duration / 10.0)
+            return min(0.50, base_risk + extra)
+        return 0.0
 
     def _compute_temporal_drift(self) -> float:
         """Compute temporal drift [0, 1] based on sustained impairment trend.
@@ -402,28 +397,33 @@ class MultiModalFusion:
     ) -> tuple[str, str]:
         """Determine recommended driver state and alert message.
 
-        Priority order:
-        1. Temporal eye closure ≥ MICROSLEEP_TIME → MICROSLEEP (overrides everything)
+        Strict hierarchy:
+        1. Temporal eye closure ≥ MICROSLEEP_TIME → MICROSLEEP (primary trigger)
         2. Temporal eye closure ≥ DROWSY_TIME → DROWSY
-        3. CRITICAL alert level → MICROSLEEP
-        4. MODERATE alert level → DROWSY
-        5. MILD with yawning or distraction → DROWSY
-        6. Otherwise → NORMAL
+        3. CRITICAL alert level with eye closure → MICROSLEEP
+        4. MODERATE alert level with fatigue (yawn / eye closure) → DROWSY
+        5. Sustained head distraction with eyes open → NORMAL (AWAKE) with caution banner
+        6. Otherwise → NORMAL (AWAKE)
         """
+        # Primary clinical trigger: eye closure duration
         if eye_closed and closed_duration >= self._microsleep_time:
             return "MICROSLEEP", "DANGER: Microsleep detected! Pull over immediately!"
 
         if eye_closed and closed_duration >= self._drowsy_time:
             return "DROWSY", "Warning: Drowsiness detected. Please take a break."
 
-        if alert_level == ALERT_CRITICAL:
+        # High risk requires eye impairment evidence to escalate to MICROSLEEP
+        if alert_level == ALERT_CRITICAL and (eye_closed or closed_duration >= self._drowsy_time):
             return "MICROSLEEP", "DANGER: Critical alertness failure detected!"
 
-        if alert_level == ALERT_MODERATE:
+        if alert_level >= ALERT_MODERATE:
             if yawning:
                 return "DROWSY", "Warning: Fatigue and yawning detected. Take a break soon."
+            if eye_closed or closed_duration >= 0.8:
+                return "DROWSY", "Warning: Elevated drowsiness indicators. Consider taking a break."
             if sustained_deviation:
-                return "DROWSY", "Warning: Sustained head distraction detected. Focus on the road."
+                # Eyes are open; sustained head deviation should not cause false drowsiness
+                return "NORMAL", "Warning: Sustained head distraction detected. Focus on the road."
             return "DROWSY", "Warning: Elevated drowsiness indicators. Consider taking a break."
 
         if alert_level == ALERT_MILD:
@@ -433,7 +433,7 @@ class MultiModalFusion:
                 return "NORMAL", "Head deviation detected. Stay focused."
             return "NORMAL", None
 
-        # NORMAL
+        # NORMAL -> AWAKE
         return "NORMAL", None
 
     # ----------------------------------------------------------------

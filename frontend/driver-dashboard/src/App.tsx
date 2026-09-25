@@ -52,8 +52,16 @@ function getWsUrl(): string {
   return `ws://${host}:8000/ws/drowsiness`;
 }
 
+export interface AssistanceResponseData {
+  emergency_id: string;
+  message: string;
+  status: string;
+  responded_at?: string;
+}
+
 export function App() {
   const [data, setData] = useState<DrowsinessData>(DEFAULT_DATA);
+  const [assistanceResponse, setAssistanceResponse] = useState<AssistanceResponseData | null>(null);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [aiCameraStatus, setAiCameraStatus] = useState<string>('DISCONNECTED');
   const [recentEvents, setRecentEvents] = useState<DrowsinessEvent[]>([]);
@@ -107,6 +115,17 @@ export function App() {
           if (!isMounted) return;
           try {
             const msg = JSON.parse(event.data);
+
+            if (msg.type === 'ASSISTANCE_RESPONSE') {
+              setAssistanceResponse({
+                emergency_id: msg.emergency_id,
+                message: msg.message,
+                status: msg.status || 'ASSISTANCE_RESPONDED',
+                responded_at: msg.responded_at,
+              });
+            } else if (msg.type === 'EMERGENCY_CANCELLED' || msg.type === 'EMERGENCY_RESOLVED') {
+              setAssistanceResponse(null);
+            }
 
             if ((msg.type === 'drowsiness_update' || msg.type === 'drowsiness') && msg.state) {
               const state = msg.state as DrowsinessState;
@@ -324,6 +343,76 @@ export function App() {
           </div>
         </div>
       </header>
+
+      {/* Highway Assistance Response Alert (Part 9 & 10) */}
+      {assistanceResponse && (
+        <section
+          className="assistance-response-banner"
+          style={{
+            background: 'linear-gradient(135deg, rgba(30, 64, 175, 0.45) 0%, rgba(17, 24, 39, 0.95) 100%)',
+            border: '2px solid #3b82f6',
+            borderRadius: '16px',
+            padding: '20px 24px',
+            marginBottom: '24px',
+            boxShadow: '0 10px 30px rgba(59, 130, 246, 0.25)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '10px',
+            position: 'relative',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span
+              style={{
+                background: '#2563eb',
+                color: '#ffffff',
+                fontSize: '0.75rem',
+                fontWeight: 700,
+                padding: '4px 12px',
+                borderRadius: '9999px',
+                letterSpacing: '0.05em',
+              }}
+            >
+              ASSISTANCE RESPONDED
+            </span>
+            <button
+              onClick={() => setAssistanceResponse(null)}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#9ca3af',
+                fontSize: '1.25rem',
+                cursor: 'pointer',
+              }}
+              title="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+          <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#60a5fa', margin: 0 }}>
+            HIGHWAY ASSISTANCE RESPONSE
+          </h3>
+          <p
+            style={{
+              fontSize: '1rem',
+              color: '#f3f4f6',
+              lineHeight: 1.5,
+              margin: 0,
+              background: 'rgba(0, 0, 0, 0.25)',
+              padding: '12px 16px',
+              borderRadius: '8px',
+              borderLeft: '4px solid #3b82f6',
+            }}
+          >
+            "{assistanceResponse.message}"
+          </p>
+          {assistanceResponse.responded_at && (
+            <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>
+              Received at: {formatEventTime(assistanceResponse.responded_at)}
+            </span>
+          )}
+        </section>
+      )}
 
       {/* Main Drowsiness Status Card */}
       <section className={`hero-state-card ${getStateClass()}`}>

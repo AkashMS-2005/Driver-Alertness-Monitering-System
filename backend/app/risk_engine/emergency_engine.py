@@ -77,8 +77,8 @@ class EmergencyEngine:
 
     @property
     def has_active_emergency(self) -> bool:
-        return self._active_emergency_id is not None and self._active_emergency_status not in (
-            "CANCELLED", "RESOLVED"
+        return self._active_emergency_id is not None and self._active_emergency_status in (
+            "ACTIVE", "DRIVER_RECOVERED", "TRIGGERING"
         )
 
     # ----------------------------------------------------------------
@@ -199,6 +199,7 @@ class EmergencyEngine:
         #  per the project specification. Two separate microsleep events are
         #  clinically significant regardless of the current PERCLOS value.)
         if self._microsleep_count >= 2:
+            self._active_emergency_status = "TRIGGERING"  # Block concurrent frame re-trigger
             logger.warning(
                 f"[EMERGENCY] AUTOMATIC EMERGENCY TRIGGERED — "
                 f"microsleep_count={self._microsleep_count} "
@@ -257,6 +258,7 @@ class EmergencyEngine:
             )
 
         except Exception as exc:
+            self._active_emergency_status = None
             logger.error(f"Failed to create automatic emergency: {exc}", exc_info=True)
 
     # ----------------------------------------------------------------
@@ -322,8 +324,9 @@ class EmergencyEngine:
 
     def on_emergency_responded(self, emergency_id: str):
         """Called when assistance responds — update in-memory state."""
-        if self._active_emergency_id == emergency_id:
+        if self._active_emergency_id == emergency_id or self._active_emergency_id is None:
             self._active_emergency_status = "ASSISTANCE_RESPONDED"
+            self._active_emergency_id = None
             self._recovery_start_time = None
             logger.info(f"ASSISTANCE RESPONSE RECEIVED — emergency={emergency_id}")
 

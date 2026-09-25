@@ -42,21 +42,29 @@ mouth_state:
 # HEAD POSE — 3D head orientation thresholds (degrees)
 # ─────────────────────────────────────────────────────
 # Head pose is estimated from 2D landmarks via solvePnP.
-# All angles are relative to a neutral forward-looking pose.
-# Only SUSTAINED deviations beyond the thresholds trigger signals.
-#
-# Positive pitch = head tilted downward
-# Positive yaw   = head rotated to the right
-# Positive roll  = head tilted to the right shoulder
+# All angles are relative to an established neutral forward driving pose.
+# Angle deviation -> Dead-zone -> Temporal duration -> Smoothing -> Hysteresis -> Decision.
 head_pose:
-  pitch_threshold: 20.0         # Degrees. Beyond this (up or down) = head deviation
-  yaw_threshold: 30.0           # Degrees. Beyond this (left or right) = head deviation
-  roll_threshold: 20.0          # Degrees. Beyond this = head deviation
-  deviation_duration: 2.0       # Seconds of sustained deviation → distraction signal
-  #
-  # Tuning guidance:
-  #   If mirror-checks trigger distraction, increase yaw_threshold (try 35-40°).
-  #   If head-drop goes undetected, decrease pitch_threshold (try 15°).
+  # Dead-zone / tolerance (variations around neutral driving pose treated as NORMAL)
+  yaw_deadzone: 12.0            # HEAD_POSE_YAW_DEADZONE (degrees)
+  pitch_deadzone: 10.0          # HEAD_POSE_PITCH_DEADZONE (degrees)
+  roll_deadzone: 10.0           # HEAD_POSE_ROLL_DEADZONE (degrees)
+
+  # Hysteresis: ENTER_THRESHOLD > EXIT_THRESHOLD (degrees)
+  enter_yaw_threshold: 30.0     # Exceeding this begins deviation timer
+  exit_yaw_threshold: 18.0      # Must drop below this to exit distraction
+  enter_pitch_threshold: 22.0
+  exit_pitch_threshold: 14.0
+  enter_roll_threshold: 22.0
+  exit_roll_threshold: 14.0
+
+  # Temporal durations (seconds)
+  deviation_min_duration: 2.0   # HEAD_DEVIATION_MIN_DURATION: sustained deviation before DISTRACTED
+  exit_duration: 0.8            # Seconds below exit threshold required to return to Normal
+
+  # Temporal smoothing & neutral baseline
+  smoothing_window_frames: 8    # Moving average window size for pitch/yaw/roll
+  calibration_frames: 30        # Frames at trip start to calibrate neutral forward baseline
 
 # ─────────────────────────────────────────────────────
 # TEMPORAL SLIDING WINDOW — short-term feature smoothing
