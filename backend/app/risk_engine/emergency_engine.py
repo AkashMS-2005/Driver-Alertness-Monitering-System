@@ -162,7 +162,7 @@ class EmergencyEngine:
                 state, drowsiness_percentage, vehicle_id
             )
         elif em_status == "DRIVER_RECOVERED":
-            # If driver becomes drowsy again during DRIVER_RECOVERED window,
+            # If driver became drowsy again during DRIVER_RECOVERED window,
             # push back to ACTIVE and disable cancel
             if state in ("DROWSY", "MICROSLEEP") or drowsiness_percentage > 50:
                 logger.info(
@@ -172,8 +172,8 @@ class EmergencyEngine:
                 self._active_emergency_status = "ACTIVE"
                 self._recovery_start_time = None
                 asyncio.create_task(
-                    self._broadcast_emergency_update(
-                        self._active_emergency_id, "ACTIVE", drowsiness_percentage
+                    self._revert_to_active_db_and_broadcast(
+                        self._active_emergency_id, drowsiness_percentage
                     )
                 )
 
@@ -228,8 +228,8 @@ class EmergencyEngine:
             from app.db.database import async_session
 
             async with async_session() as db:
-                # Double-check: no active emergency already in DB
-                existing = await emergency_service.get_active_emergency(vehicle_id, db)
+                # Double-check: no active emergency already in DB for this trip
+                existing = await emergency_service.get_active_emergency(vehicle_id, db, trip_id=trip_id)
                 if existing:
                     # Already tracked — sync in-memory state
                     self._active_emergency_id = existing.id
@@ -328,6 +328,7 @@ class EmergencyEngine:
             self._active_emergency_status = "ASSISTANCE_RESPONDED"
             self._active_emergency_id = None
             self._recovery_start_time = None
+            self._microsleep_count = 0  # Reset for future separate microsleep episodes
             logger.info(f"ASSISTANCE RESPONSE RECEIVED — emergency={emergency_id}")
 
     def on_emergency_cancelled(self, emergency_id: str):
@@ -369,6 +370,26 @@ class EmergencyEngine:
     # ----------------------------------------------------------------
     # WebSocket broadcast helpers
     # ----------------------------------------------------------------
+
+    async def _revert_to_active_db_and_broadcast(
+        self, emergency_id: Optional[str], drowsiness_percentage: float
+    ):
+        """Revert emergency status to ACTIVE in database and broadcast update."""
+        if not emergency_id:
+            return
+        try:
+            from app.services.emergency_service import emergency_service
+            from app.db.database import async_session
+
+            async with async_session() as db:
+                await emergency_service.revert_to_active(emergency_id, db)
+                await db.commit()
+        except Exception as exc:
+            logger.error(f"Failed to revert emergency {emergency_id} to ACTIVE in DB: {exc}")
+
+        await self._broadcast_emergency_update(
+            emergency_id, "ACTIVE", drowsiness_percentage
+        )
 
     async def _broadcast_emergency_update(
         self, emergency_id: Optional[str], status: str, drowsiness_percentage: float

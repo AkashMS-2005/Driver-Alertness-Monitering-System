@@ -10,6 +10,7 @@ Main entry point for the backend server. Handles:
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -241,12 +242,23 @@ async def lifespan(app: FastAPI):
     # This gives the EmergencyEngine real DB IDs so it can
     # create EmergencyEvent records with correct foreign keys.
     try:
-        from sqlalchemy import select
+        from sqlalchemy import select, update
         from app.models.vehicle import Vehicle
         from app.models.trip import Trip
+        from app.models.emergency_event import EmergencyEvent
         from app.risk_engine.state_machine import update_active_vehicle_trip
 
         async with async_session() as session:
+            # Resolve dangling emergencies left over from prior aborted server runs
+            now = datetime.now(timezone.utc)
+            await session.execute(
+                update(EmergencyEvent)
+                .where(EmergencyEvent.status.in_(["ACTIVE", "DRIVER_RECOVERED"]))
+                .values(status="RESOLVED", resolved_at=now)
+            )
+            await session.commit()
+            logger.info("Dangling unclosed emergencies from prior runs marked as RESOLVED")
+
             veh_res = await session.execute(select(Vehicle).limit(1))
             veh = veh_res.scalar_one_or_none()
             if veh:
@@ -356,19 +368,18 @@ DEV_FRONTEND_ORIGINS = [
     "http://localhost:5176",
     "http://localhost:5174",
     "http://localhost:5173",
-
-    # Some systems resolve localhost differently.
     "http://127.0.0.1:5176",
     "http://127.0.0.1:5174",
     "http://127.0.0.1:5173",
+    "*",
 ]
 
 
 app.add_middleware(
     CORSMiddleware,
 
-    # Explicit development origins
-    allow_origins=DEV_FRONTEND_ORIGINS,
+    # Allow all origins so local, LAN (e.g., 192.168.151.242), and mobile browsers can access API
+    allow_origins=["*"],
 
     # JWT is stored in localStorage.
     # We are NOT using browser cookies.

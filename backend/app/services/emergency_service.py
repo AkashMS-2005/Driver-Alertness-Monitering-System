@@ -79,19 +79,34 @@ class _EmergencyService:
     # ----------------------------------------------------------------
 
     async def get_active_emergency(
-        self, vehicle_id: str, db: AsyncSession
+        self, vehicle_id: str, db: AsyncSession, trip_id: Optional[str] = None
     ) -> Optional[EmergencyEvent]:
-        """Return the active EmergencyEvent for a vehicle, or None."""
+        """Return the active EmergencyEvent for a vehicle and trip, or None."""
         query = (
             select(EmergencyEvent)
             .where(EmergencyEvent.status.in_(["ACTIVE", "DRIVER_RECOVERED"]))
         )
         if vehicle_id and vehicle_id != "vehicle-1":
             query = query.where(EmergencyEvent.vehicle_id == vehicle_id)
+        if trip_id and trip_id != "trip-active-1":
+            query = query.where(EmergencyEvent.trip_id == trip_id)
         result = await db.execute(
             query.order_by(EmergencyEvent.detected_at.desc()).limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def revert_to_active(
+        self, emergency_id: str, db: AsyncSession
+    ) -> Optional[EmergencyEvent]:
+        """Revert a DRIVER_RECOVERED emergency back to ACTIVE."""
+        result = await db.execute(
+            select(EmergencyEvent).where(EmergencyEvent.id == emergency_id)
+        )
+        emergency = result.scalar_one_or_none()
+        if emergency and emergency.status == "DRIVER_RECOVERED":
+            emergency.status = "ACTIVE"
+            await db.flush()
+        return emergency
 
     async def _get_vehicle_location(
         self, vehicle_id: str, db: AsyncSession
