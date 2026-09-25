@@ -28,6 +28,8 @@ def _validate_twilio_request(request: Request, form_data: dict):
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
     url = f"{proto}://{host}{request.url.path}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
 
     if not validator.validate(url, form_data, signature):
         logger.warning(f"[Twilio Webhook] Invalid signature for URL {url}")

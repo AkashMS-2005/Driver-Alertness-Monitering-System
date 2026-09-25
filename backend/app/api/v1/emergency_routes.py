@@ -139,10 +139,9 @@ class EmergencyTriggerResponse(BaseModel):
 
 class AssistanceRespondRequest(BaseModel):
     """Payload for assistance response endpoint."""
-    message: str = (
-        "Emergency request received. Highway assistance team is responding to the vehicle location. "
-        "Please remain calm and stay safely inside the vehicle if possible."
-    )
+    action: str = "ACCEPT"  # "ACCEPT" or "REJECT"
+    message: str | None = None
+    response_source: str = "MANUAL"
 
 
 class CancelEmergencyRequest(BaseModel):
@@ -205,7 +204,7 @@ async def get_all_emergency_history(
     )
     events = list(result.scalars().all())
 
-    # Enrich each event with HighwayAssistance data
+    # Enrich each event with HighwayAssistance, Vehicle, and SMS data
     enriched = []
     for ev in events:
         ev_dict = {
@@ -213,6 +212,7 @@ async def get_all_emergency_history(
             "emergency_id": ev.id,
             "trip_id": ev.trip_id,
             "vehicle_id": ev.vehicle_id,
+            "vehicle_plate": "MH-01-AB-1234",
             "emergency_type": ev.emergency_type,
             "status": ev.status,
             "trigger_source": getattr(ev, "trigger_source", "UNKNOWN"),
@@ -224,7 +224,10 @@ async def get_all_emergency_history(
             "drowsiness_percentage": ev.drowsiness_percentage,
             "detected_at": ev.detected_at.isoformat() if ev.detected_at else None,
             "triggered_at": ev.triggered_at.isoformat() if ev.triggered_at else None,
+            "response_source": getattr(ev, "response_source", None),
+            "assistance_response_status": getattr(ev, "assistance_response_status", None),
             "response_message": ev.response_message,
+            "raw_response": ev.response_message,
             "responded_at": ev.responded_at.isoformat() if ev.responded_at else None,
             "cancelled_at": ev.cancelled_at.isoformat() if ev.cancelled_at else None,
             "cancelled_reason": ev.cancelled_reason,
@@ -232,6 +235,16 @@ async def get_all_emergency_history(
             "assistance_name": None,
             "assistance_distance_km": None,
         }
+        # Fetch vehicle plate
+        if ev.vehicle_id:
+            try:
+                v_res = await db.execute(sa_select(Vehicle).where(Vehicle.id == ev.vehicle_id).limit(1))
+                v_obj = v_res.scalar_one_or_none()
+                if v_obj and v_obj.plate_number:
+                    ev_dict["vehicle_plate"] = v_obj.plate_number
+            except Exception:
+                pass
+
         # Fetch linked HighwayAssistance
         try:
             assist_res = await db.execute(
@@ -259,11 +272,15 @@ async def get_all_emergency_history(
                 ev_dict["sms_status"] = sms_log.sms_status
                 ev_dict["sms_sent_at"] = sms_log.sent_at.isoformat() if sms_log.sent_at else None
                 ev_dict["assistance_phone_number"] = sms_log.assistance_phone_number
-                ev_dict["assistance_response_status"] = sms_log.assistance_response_status
+                if sms_log.assistance_response_status and not ev_dict["assistance_response_status"]:
+                    ev_dict["assistance_response_status"] = sms_log.assistance_response_status
                 if sms_log.assistance_response_message:
                     ev_dict["response_message"] = sms_log.assistance_response_message
-                if sms_log.assistance_responded_at:
+                    ev_dict["raw_response"] = sms_log.assistance_response_message
+                if sms_log.assistance_responded_at and not ev_dict["responded_at"]:
                     ev_dict["responded_at"] = sms_log.assistance_responded_at.isoformat()
+                if not ev_dict["response_source"] and sms_log.assistance_responded_at:
+                    ev_dict["response_source"] = "SMS"
         except Exception:
             pass
 
@@ -287,20 +304,17 @@ async def respond_to_emergency(
     payload: AssistanceRespondRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """[DEV] Simulate highway assistance response.
+    """Manual emergency response endpoint from owner dashboard.
 
-    In production this would be called by the toll operator's application.
-    This endpoint validates the emergency, records the response, and
-    broadcasts ASSISTANCE_RESPONSE to all connected owner dashboards.
+    Updates the existing EmergencyEvent, updates HighwayAssistance and
+    EmergencySmsLog, and broadcasts ASSISTANCE_RESPONSE via WebSocket.
     """
     try:
-        msg = payload.message or (
-            "Emergency request received. Highway assistance team is responding to the vehicle location. "
-            "Please remain calm and stay safely inside the vehicle if possible."
-        )
         emergency = await emergency_service.respond_to_emergency(
             emergency_id=emergency_id,
-            message=msg,
+            message=payload.message,
+            action=payload.action,
+            response_source=payload.response_source,
             db=db,
         )
         await db.commit()
@@ -308,9 +322,10 @@ async def respond_to_emergency(
             "success": True,
             "emergency_id": emergency.id,
             "status": emergency.status,
-            "message": msg,
+            "response_status": getattr(emergency, "assistance_response_status", "ACCEPTED"),
+            "response_source": getattr(emergency, "response_source", "MANUAL"),
+            "message": emergency.response_message,
             "responded_at": emergency.responded_at.isoformat() if emergency.responded_at else None,
-            "note": "[DEV] This is a development/mock response endpoint. No real toll operator was contacted.",
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

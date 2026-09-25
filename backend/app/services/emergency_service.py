@@ -307,9 +307,14 @@ class _EmergencyService:
     # ----------------------------------------------------------------
 
     async def respond_to_emergency(
-        self, emergency_id: str, message: str, db: AsyncSession
+        self,
+        emergency_id: str,
+        message: Optional[str] = None,
+        db: Optional[AsyncSession] = None,
+        action: str = "ACCEPT",
+        response_source: str = "MANUAL",
     ) -> EmergencyEvent:
-        """Record assistance response and transition to ASSISTANCE_RESPONDED."""
+        """Record assistance response (manual or automated) and transition to ASSISTANCE_RESPONDED."""
         result = await db.execute(
             select(EmergencyEvent).where(EmergencyEvent.id == emergency_id)
         )
@@ -323,14 +328,61 @@ class _EmergencyService:
             )
 
         now = datetime.now(timezone.utc)
+        action_norm = "REJECTED" if action.upper().startswith("REJECT") else "ACCEPTED"
+        short_id = emergency.id.replace("-", "")[-8:].upper()
+
+        if action_norm == "ACCEPTED":
+            default_expl = message or "Highway assistance team has accepted the request."
+            default_raw = f"ACCEPT {short_id}"
+        else:
+            default_expl = message or "Highway assistance rejected the request."
+            default_raw = f"REJECT {short_id}"
+
+        response_msg = message or default_raw
+
         emergency.status = "ASSISTANCE_RESPONDED"
-        emergency.response_message = message
+        emergency.assistance_response_status = action_norm
+        emergency.response_source = response_source
+        emergency.response_message = response_msg
         emergency.responded_at = now
         await db.flush()
 
+        # Update HighwayAssistance table record if exists
+        try:
+            assist_res = await db.execute(
+                select(HighwayAssistance)
+                .where(HighwayAssistance.emergency_id == emergency.id)
+                .limit(1)
+            )
+            assist = assist_res.scalar_one_or_none()
+            if assist:
+                assist.status = action_norm
+                assist.resolved_at = now
+        except Exception as e:
+            logger.error(f"Could not update HighwayAssistance for {emergency.id}: {e}")
+
+        # Update EmergencySmsLog if exists
+        try:
+            sms_res = await db.execute(
+                select(EmergencySmsLog)
+                .where(EmergencySmsLog.emergency_id == emergency.id)
+                .order_by(EmergencySmsLog.sent_at.desc())
+                .limit(1)
+            )
+            sms_log = sms_res.scalar_one_or_none()
+            if sms_log:
+                sms_log.assistance_response_status = action_norm
+                sms_log.assistance_response_message = response_msg
+                sms_log.assistance_responded_at = now
+        except Exception as e:
+            logger.debug(f"Could not sync EmergencySmsLog for {emergency.id}: {e}")
+
         # Update in-memory engine state
-        from app.risk_engine.emergency_engine import emergency_engine
-        emergency_engine.on_emergency_responded(emergency_id)
+        try:
+            from app.risk_engine.emergency_engine import emergency_engine
+            emergency_engine.on_emergency_responded(emergency_id)
+        except Exception as eng_err:
+            logger.debug(f"Emergency engine sync: {eng_err}")
 
         # Broadcast ASSISTANCE_RESPONSE to ALL connected dashboards (owner AND driver)
         try:
@@ -339,15 +391,17 @@ class _EmergencyService:
                 "type": "ASSISTANCE_RESPONSE",
                 "emergency_id": emergency_id,
                 "status": "ASSISTANCE_RESPONDED",
-                "message": message,
+                "response_status": action_norm,
+                "response_source": response_source,
+                "message": default_expl,
+                "response_message": response_msg,
+                "raw_response": response_msg,
                 "responded_at": now.isoformat(),
             })
         except Exception as exc:
             logger.error(f"Failed to broadcast ASSISTANCE_RESPONSE: {exc}")
 
-        logger.info(f"ASSISTANCE RESPONSE RECEIVED — emergency={emergency_id}")
-
-        # The status remains ASSISTANCE_RESPONDED in database & emergency history
+        logger.info(f"ASSISTANCE RESPONSE RECORDED ({response_source}) — emergency={emergency_id} action={action_norm}")
         return emergency
 
     async def _auto_resolve(self, emergency: EmergencyEvent, db: AsyncSession):
@@ -486,13 +540,15 @@ class _EmergencyService:
             "assistance_name": assist.assistance_name if assist else None,
             "assistance_distance_km": assist.distance_km if assist else None,
             "triggered_at": emergency.triggered_at.isoformat() if emergency.triggered_at else None,
+            "response_source": getattr(emergency, "response_source", None) or ("SMS" if (sms_log and sms_log.assistance_responded_at) else None),
             "response_message": (sms_log.assistance_response_message if sms_log and sms_log.assistance_response_message else None) or emergency.response_message,
+            "raw_response": (sms_log.assistance_response_message if sms_log and sms_log.assistance_response_message else None) or emergency.response_message,
             "responded_at": (sms_log.assistance_responded_at.isoformat() if sms_log and sms_log.assistance_responded_at else None) or (emergency.responded_at.isoformat() if emergency.responded_at else None),
             "cancelled_at": emergency.cancelled_at.isoformat() if emergency.cancelled_at else None,
             "cancelled_reason": emergency.cancelled_reason,
             "sms_status": sms_log.sms_status if sms_log else None,
             "sms_sent_at": sms_log.sent_at.isoformat() if (sms_log and sms_log.sent_at) else None,
-            "assistance_response_status": sms_log.assistance_response_status if sms_log else None,
+            "assistance_response_status": getattr(emergency, "assistance_response_status", None) or (sms_log.assistance_response_status if sms_log else None),
             "assistance_phone_number": sms_log.assistance_phone_number if sms_log else None,
         }
 

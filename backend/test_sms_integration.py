@@ -102,7 +102,7 @@ async def run_tests():
     assert sms_log is not None
     print(f"SMS Log created: id={sms_log.id}, status={sms_log.sms_status}")
     print(f"SMS Body preview:\n{sms_log.sms_body}")
-    assert f"#{short_id}" in sms_log.sms_body
+    assert f"Emergency ID: {short_id}" in sms_log.sms_body
     assert vehicle.plate_number in sms_log.sms_body
     assert "Kengeri Toll Plaza" in sms_log.sms_body
     print("SMS Alert Generation: PASSED")
@@ -122,16 +122,15 @@ async def run_tests():
         # Verify DB updated
         em_check = (await db.execute(select(EmergencyEvent).where(EmergencyEvent.id == emergency.id))).scalar_one()
         assert em_check.status == "ASSISTANCE_RESPONDED"
-        assert em_check.response_message == "Highway assistance team has accepted the request."
+        assert em_check.assistance_response_status == "ACCEPTED"
+        assert em_check.response_source == "SMS"
+        assert em_check.response_message == f"ACCEPT {short_id}"
         assert em_check.responded_at is not None
         print(f"DB Emergency status: {em_check.status}, responded_at: {em_check.responded_at}")
 
         # Verify SMS Log updated
         log_check_res = await db.execute(select(EmergencySmsLog).where(EmergencySmsLog.emergency_id == emergency.id).order_by(EmergencySmsLog.sent_at.desc()))
         logs = list(log_check_res.scalars().all())
-        print(f"Found {len(logs)} logs for emergency {emergency.id}:")
-        for l in logs:
-            print(f"  Log ID: {l.id}, status: {l.sms_status}, assist_resp_status: {l.assistance_response_status}, phone: {l.assistance_phone_number}")
         assert any(l.assistance_response_status == "ACCEPTED" for l in logs)
         print("Inbound ACCEPT: PASSED")
 
@@ -168,10 +167,123 @@ async def run_tests():
 
         em2_check = (await db.execute(select(EmergencyEvent).where(EmergencyEvent.id == em2.id))).scalar_one()
         assert em2_check.status == "ASSISTANCE_RESPONDED"
-        assert em2_check.response_message == "Highway assistance rejected the request."
+        assert em2_check.assistance_response_status == "REJECTED"
+        assert em2_check.response_source == "SMS"
+        assert em2_check.response_message == f"REJECT {short_id2}"
         print("Inbound REJECT: PASSED")
 
-    print("\n--- 6. Testing Delivery Status Callback ---")
+    print("\n--- 6. Testing General Inbound SMS (No ID when 1 active emergency) ---")
+    async with async_session() as db:
+        # Mark any lingering active emergencies from prior tests as RESOLVED
+        from sqlalchemy import update
+        await db.execute(
+            update(EmergencyEvent)
+            .where(EmergencyEvent.status.in_(["ACTIVE", "DRIVER_RECOVERED"]))
+            .values(status="RESOLVED")
+        )
+        await db.commit()
+
+        em3 = EmergencyEvent(
+            trip_id=trip.id,
+            vehicle_id=vehicle.id,
+            owner_id=owner.id,
+            emergency_type="AUTO_DROWSINESS",
+            status="ACTIVE",
+            trigger_source="AUTO_DROWSINESS",
+            description="Third test emergency for general response",
+            latitude=12.9716,
+            longitude=77.5946,
+            microsleep_count=2,
+            drowsiness_percentage=88.0,
+            detected_at=datetime.now(timezone.utc),
+        )
+        db.add(em3)
+        await db.commit()
+
+        success, reply_twiml, matched_em_id = await sms_service.handle_incoming_sms(
+            from_number="+919876543210",
+            body="ACCEPT",
+            message_sid="SM_TEST_GENERAL_003",
+            db=db,
+        )
+        print(f"General ACCEPT result: success={success}, reply='{reply_twiml}'")
+        assert success is True
+        assert matched_em_id == em3.id
+        em3_check = (await db.execute(select(EmergencyEvent).where(EmergencyEvent.id == em3.id))).scalar_one()
+        assert em3_check.status == "ASSISTANCE_RESPONDED"
+        assert em3_check.assistance_response_status == "ACCEPTED"
+        print("General Inbound ACCEPT: PASSED")
+
+    print("\n--- 7. Testing Manual Website Response (METHOD 2) ---")
+    async with async_session() as db:
+        from app.services.emergency_service import emergency_service
+
+        em4 = EmergencyEvent(
+            trip_id=trip.id,
+            vehicle_id=vehicle.id,
+            owner_id=owner.id,
+            emergency_type="AUTO_DROWSINESS",
+            status="ACTIVE",
+            trigger_source="AUTO_DROWSINESS",
+            description="Fourth test emergency for manual website response",
+            latitude=12.9716,
+            longitude=77.5946,
+            microsleep_count=2,
+            drowsiness_percentage=82.0,
+            detected_at=datetime.now(timezone.utc),
+        )
+        db.add(em4)
+        await db.flush()
+
+        # Test Manual ACCEPT
+        em4_updated = await emergency_service.respond_to_emergency(
+            emergency_id=em4.id,
+            action="ACCEPT",
+            response_source="MANUAL",
+            db=db,
+        )
+        assert em4_updated.status == "ASSISTANCE_RESPONDED"
+        assert em4_updated.assistance_response_status == "ACCEPTED"
+        assert em4_updated.response_source == "MANUAL"
+        print("Manual Website ACCEPT: PASSED")
+
+    print("\n--- 8. Testing Manual Cancellation Rules ---")
+    async with async_session() as db:
+        em5 = EmergencyEvent(
+            trip_id=trip.id,
+            vehicle_id=vehicle.id,
+            owner_id=owner.id,
+            emergency_type="AUTO_DROWSINESS",
+            status="ACTIVE",
+            trigger_source="AUTO_DROWSINESS",
+            description="Fifth test emergency for cancellation",
+            latitude=12.9716,
+            longitude=77.5946,
+            microsleep_count=2,
+            drowsiness_percentage=30.0,
+            detected_at=datetime.now(timezone.utc),
+        )
+        db.add(em5)
+        await db.flush()
+
+        # Cannot cancel while ACTIVE (must be DRIVER_RECOVERED)
+        try:
+            await emergency_service.cancel_emergency(em5.id, "Testing cancel", db)
+            assert False, "Should not cancel ACTIVE emergency"
+        except ValueError:
+            print("Cannot cancel ACTIVE emergency before recovery: PASSED (Security verified)")
+
+        # Transition to DRIVER_RECOVERED
+        em5.status = "DRIVER_RECOVERED"
+        await db.flush()
+
+        # Now cancellation is allowed
+        em5_cancelled = await emergency_service.cancel_emergency(em5.id, "Driver fully awake", db)
+        assert em5_cancelled.status == "CANCELLED"
+        assert em5_cancelled.cancelled_at is not None
+        print("Driver recovery cancellation: PASSED")
+
+    print("\n--- 9. Testing Delivery Status Callback ---")
     async with async_session() as db:
         await sms_service.handle_delivery_status(
             message_sid=sms_log.sms_message_sid or "NONEXISTENT",
@@ -180,7 +292,7 @@ async def run_tests():
         )
         print("Delivery status callback test complete.")
 
-    print("\nALL SMS INTEGRATION TESTS PASSED SUCCESSFULLY!")
+    print("\nALL SMS & EMERGENCY INTEGRATION TESTS PASSED SUCCESSFULLY!")
 
 
 if __name__ == "__main__":

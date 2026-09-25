@@ -1567,3 +1567,112 @@ html, body, #root {
   border-color: rgba(255, 255, 255, 0.4);
 }
 
+/* Response details inside status card */
+.emg-status-detail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.emg-detail-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.emg-detail-lbl {
+  color: #8b949e;
+  font-weight: 500;
+}
+.emg-detail-val {
+  color: #f0f6fc;
+  font-weight: 600;
+}
+.emg-source-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+/* Manual Response Controls Box */
+.emg-manual-response-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+}
+.emg-manual-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.emg-manual-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #8b949e;
+  text-transform: uppercase;
+}
+.emg-manual-sub {
+  font-size: 11px;
+  color: #7d8590;
+}
+.emg-manual-actions {
+  display: flex;
+  gap: 10px;
+}
+.btn-manual-accept {
+  flex: 1;
+  padding: 7px 12px;
+  border: 1px solid rgba(63, 185, 80, 0.4);
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-manual-accept:hover:not(:disabled) {
+  background: rgba(63, 185, 80, 0.3);
+  border-color: #3fb950;
+  color: #ffffff;
+}
+.btn-manual-reject {
+  flex: 1;
+  padding: 7px 12px;
+  border: 1px solid rgba(248, 81, 73, 0.4);
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-manual-reject:hover:not(:disabled) {
+  background: rgba(248, 81, 73, 0.3);
+  border-color: #f85149;
+  color: #ffffff;
+}
+.btn-manual-accept:disabled,
+.btn-manual-reject:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.emg-manual-error {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #f85149;
+}
+

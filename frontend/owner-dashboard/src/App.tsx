@@ -96,7 +96,9 @@ interface ActiveEmergency {
   assistance_name: string | null;
   assistance_distance_km: number | null;
   triggered_at: string | null;
+  response_source?: string | null;
   response_message: string | null;
+  raw_response?: string | null;
   responded_at: string | null;
   cancelled_at: string | null;
   cancelled_reason: string | null;
@@ -190,6 +192,8 @@ function EmergencyAlertCard({
   const [showConfirm, setShowConfirm] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState('');
+  const [responding, setResponding] = useState(false);
+  const [responseError, setResponseError] = useState('');
 
   const status = emergency.status;
 
@@ -201,6 +205,30 @@ function EmergencyAlertCard({
   // Hide card after cancelled/resolved/dismissed
   if (status === 'CANCELLED' || status === 'RESOLVED' || emergency._dismissed) {
     return null;
+  }
+
+  async function handleManualResponse(action: 'ACCEPT' | 'REJECT') {
+    setResponding(true);
+    setResponseError('');
+    try {
+      const res = await fetch(`${apiBase()}/api/v1/emergency/${emergency.emergency_id}/respond`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          response_source: 'MANUAL',
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.detail || 'Manual response failed');
+      }
+      window.dispatchEvent(new Event('emergency_updated'));
+    } catch (err: unknown) {
+      setResponseError(err instanceof Error ? err.message : 'Manual response failed');
+    } finally {
+      setResponding(false);
+    }
   }
 
   async function confirmCancel() {
@@ -319,7 +347,7 @@ function EmergencyAlertCard({
           </div>
         )}
 
-        {/* Real-time Highway Assistance Status Box (Replaced Manual Simulation) */}
+        {/* Real-time Highway Assistance Status Box */}
         <div className="emg-live-assistance-box">
           <div className="emg-status-heading">ASSISTANCE STATUS</div>
           <div className="emg-status-content">
@@ -328,38 +356,90 @@ function EmergencyAlertCard({
                 <>
                   <div className="emg-status-title-row">
                     <span className="emg-status-title-badge rejected">✕ REQUEST REJECTED</span>
+                  </div>
+                  <p className="emg-status-message-text">Highway assistance rejected the request.</p>
+                  <div className="emg-status-detail-group">
+                    <div className="emg-detail-item">
+                      <span className="emg-detail-lbl">Response:</span>
+                      <span className="emg-detail-val mono">{emergency.raw_response || emergency.response_message || 'REJECT'}</span>
+                      {emergency.response_source && (
+                        <span className="emg-source-tag">via {emergency.response_source}</span>
+                      )}
+                    </div>
                     {emergency.responded_at && (
-                      <span className="emg-status-timestamp">Response: {fmtTime(emergency.responded_at)}</span>
+                      <div className="emg-detail-item">
+                        <span className="emg-detail-lbl">Response Time:</span>
+                        <span className="emg-detail-val mono">{fmtTime(emergency.responded_at)}</span>
+                      </div>
                     )}
                   </div>
-                  <p className="emg-status-message-text">"Highway assistance rejected the request."</p>
                 </>
               ) : (
                 <>
                   <div className="emg-status-title-row">
                     <span className="emg-status-title-badge accepted">✓ REQUEST ACCEPTED</span>
+                  </div>
+                  <p className="emg-status-message-text">Highway assistance has accepted the emergency request.</p>
+                  <div className="emg-status-detail-group">
+                    <div className="emg-detail-item">
+                      <span className="emg-detail-lbl">Response:</span>
+                      <span className="emg-detail-val mono">{emergency.raw_response || emergency.response_message || 'ACCEPT'}</span>
+                      {emergency.response_source && (
+                        <span className="emg-source-tag">via {emergency.response_source}</span>
+                      )}
+                    </div>
                     {emergency.responded_at && (
-                      <span className="emg-status-timestamp">Response: {fmtTime(emergency.responded_at)}</span>
+                      <div className="emg-detail-item">
+                        <span className="emg-detail-lbl">Response Time:</span>
+                        <span className="emg-detail-val mono">{fmtTime(emergency.responded_at)}</span>
+                      </div>
                     )}
                   </div>
-                  <p className="emg-status-message-text">
-                    "{emergency.response_message || 'Highway assistance team has accepted the request.'}"
-                  </p>
                 </>
               )
-            ) : emergency.sms_status === 'SMS_FAILED' ? (
-              <>
-                <div className="emg-status-title-row">
-                  <span className="emg-status-title-badge failed">⚠ SMS DELIVERY FAILED</span>
-                </div>
-                <span className="emg-status-timestamp">Waiting for highway assistance response...</span>
-              </>
             ) : (
               <>
                 <div className="emg-status-title-row">
-                  <span className="emg-status-title-badge waiting">📱 SMS SENT</span>
+                  {emergency.sms_status === 'SMS_FAILED' ? (
+                    <span className="emg-status-title-badge failed">⚠ SMS DELIVERY FAILED</span>
+                  ) : emergency.sms_status === 'SMS_DELIVERED' ? (
+                    <span className="emg-status-title-badge waiting">📱 SMS DELIVERED</span>
+                  ) : emergency.sms_status === 'SMS_PENDING' ? (
+                    <span className="emg-status-title-badge waiting">⏳ SMS PENDING</span>
+                  ) : (
+                    <span className="emg-status-title-badge waiting">📱 SMS SENT</span>
+                  )}
                 </div>
-                <span className="emg-status-timestamp">Waiting for highway assistance response...</span>
+                <span className="emg-status-timestamp">Waiting for response...</span>
+
+                {/* Manual Response Controls Box (Section 12: Manual Website Response) */}
+                <div className="emg-manual-response-box">
+                  <div className="emg-manual-header">
+                    <span className="emg-manual-title">MANUAL RESPONSE</span>
+                    <span className="emg-manual-sub">Respond directly from website dashboard</span>
+                  </div>
+                  <div className="emg-manual-actions">
+                    <button
+                      id="btn-manual-accept"
+                      className="btn-manual-accept"
+                      onClick={() => handleManualResponse('ACCEPT')}
+                      disabled={responding}
+                      title="Manually accept emergency assistance"
+                    >
+                      {responding ? 'Submitting…' : '✓ ACCEPT ASSISTANCE'}
+                    </button>
+                    <button
+                      id="btn-manual-reject"
+                      className="btn-manual-reject"
+                      onClick={() => handleManualResponse('REJECT')}
+                      disabled={responding}
+                      title="Manually reject emergency assistance"
+                    >
+                      {responding ? 'Submitting…' : '✕ REJECT ASSISTANCE'}
+                    </button>
+                  </div>
+                  {responseError && <p className="emg-manual-error">{responseError}</p>}
+                </div>
               </>
             )}
           </div>
@@ -1108,6 +1188,8 @@ function DrowsinessHistoryPage({ events }: { events: SafetyEvent[] }) {
 // ─────────────────────────────────────────────────────────────
 interface EmergencyHistoryItem {
   id: string;
+  trip_id?: string | null;
+  vehicle_id?: string | null;
   status: string;
   microsleep_count: number | null;
   drowsiness_percentage: number | null;
@@ -1117,6 +1199,7 @@ interface EmergencyHistoryItem {
   triggered_at: string | null;
   detected_at: string;
   response_message: string | null;
+  vehicle_plate?: string | null;
   responded_at: string | null;
   cancelled_at: string | null;
   cancelled_reason: string | null;
@@ -1127,6 +1210,8 @@ interface EmergencyHistoryItem {
   sms_sent_at?: string | null;
   assistance_phone_number?: string | null;
   assistance_response_status?: string | null;
+  response_source?: string | null;
+  raw_response?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1410,6 +1495,16 @@ function EmergencyAssistancePage({
 
                   <div className="emg-hist-grid">
                     <div className="emg-hist-field">
+                      <span className="emg-hist-label">Vehicle</span>
+                      <span className="emg-hist-value mono">{ev.vehicle_plate || 'MH-01-AB-1234'}</span>
+                    </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Trip</span>
+                      <span className="emg-hist-value mono">Trip #{ev.trip_id ? ev.trip_id.slice(-8).toUpperCase() : 'ACTIVE'}</span>
+                    </div>
+
+                    <div className="emg-hist-field">
                       <span className="emg-hist-label">Microsleep Events</span>
                       <span className="emg-hist-value txt-red" style={{ fontWeight: 700 }}>
                         {ev.microsleep_count != null && ev.microsleep_count > 0 ? ev.microsleep_count : 2}
@@ -1430,7 +1525,7 @@ function EmergencyAssistancePage({
 
                     <div className="emg-hist-field">
                       <span className="emg-hist-label">Nearest Assistance</span>
-                      <span className="emg-hist-value">{ev.assistance_name || 'Kengeri Toll Plaza'}</span>
+                      <span className="emg-hist-value">{ev.assistance_name || 'Kengeri Toll Plaza (NICE Road)'}</span>
                     </div>
 
                     <div className="emg-hist-field">
@@ -1441,7 +1536,7 @@ function EmergencyAssistancePage({
                     </div>
 
                     <div className="emg-hist-field">
-                      <span className="emg-hist-label">Triggered</span>
+                      <span className="emg-hist-label">Emergency Time</span>
                       <span className="emg-hist-value mono">{displayTime ? fmtTime(displayTime) : '—'}</span>
                     </div>
 
@@ -1456,7 +1551,7 @@ function EmergencyAssistancePage({
                     </div>
 
                     <div className="emg-hist-field">
-                      <span className="emg-hist-label">Response Status</span>
+                      <span className="emg-hist-label">Response</span>
                       <span className={`emg-hist-value ${
                         ev.assistance_response_status === 'ACCEPTED' ? 'txt-green' :
                         ev.assistance_response_status === 'REJECTED' ? 'txt-red' : 'txt-amber'
@@ -1464,6 +1559,20 @@ function EmergencyAssistancePage({
                         {ev.assistance_response_status || (ev.status === 'ASSISTANCE_RESPONDED' ? 'ACCEPTED' : 'PENDING')}
                       </span>
                     </div>
+
+                    <div className="emg-hist-field">
+                      <span className="emg-hist-label">Response Source</span>
+                      <span className="emg-hist-value" style={{ fontWeight: 600 }}>
+                        {ev.response_source || (ev.assistance_phone_number ? 'SMS' : ev.status === 'ASSISTANCE_RESPONDED' ? 'MANUAL' : '—')}
+                      </span>
+                    </div>
+
+                    {ev.responded_at && (
+                      <div className="emg-hist-field">
+                        <span className="emg-hist-label">Response Time</span>
+                        <span className="emg-hist-value mono">{fmtTime(ev.responded_at)}</span>
+                      </div>
+                    )}
 
                     {ev.assistance_phone_number && (
                       <div className="emg-hist-field">
@@ -1593,7 +1702,9 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
                 ...prev,
                 status: 'ASSISTANCE_RESPONDED',
                 assistance_response_status: (msg.response_status || (msg.status === 'REJECTED' ? 'REJECTED' : 'ACCEPTED')) as EmergencyStatus,
-                response_message: msg.message || 'Highway assistance team has responded.',
+                response_source: msg.response_source || 'SMS',
+                response_message: msg.response_message || msg.raw_response || msg.message || 'Highway assistance team has responded.',
+                raw_response: msg.raw_response || msg.response_message,
                 responded_at: msg.responded_at || new Date().toISOString(),
               } : prev
             );
@@ -1692,7 +1803,9 @@ function DashboardApp({ user, onLogout }: { user: AuthUser; onLogout: () => void
                 ...prev,
                 status: 'ASSISTANCE_RESPONDED',
                 assistance_response_status: (data.response_status || (data.status === 'REJECTED' ? 'REJECTED' : 'ACCEPTED')) as EmergencyStatus,
-                response_message: data.message || 'Highway assistance team has responded.',
+                response_source: data.response_source || 'SMS',
+                response_message: data.response_message || data.raw_response || data.message || 'Highway assistance team has responded.',
+                raw_response: data.raw_response || data.response_message,
                 responded_at: data.responded_at || new Date().toISOString(),
               } : prev
             );

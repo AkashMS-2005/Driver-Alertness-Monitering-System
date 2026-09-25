@@ -73,6 +73,8 @@ def _migrate_sqlite_columns(sync_conn):
             ("microsleep_count", "INTEGER DEFAULT 0"),
             ("drowsiness_percentage", "FLOAT DEFAULT 0.0"),
             ("triggered_at", "DATETIME"),
+            ("response_source", "VARCHAR(20)"),
+            ("assistance_response_status", "VARCHAR(30)"),
             ("response_message", "TEXT"),
             ("responded_at", "DATETIME"),
             ("cancelled_at", "DATETIME"),

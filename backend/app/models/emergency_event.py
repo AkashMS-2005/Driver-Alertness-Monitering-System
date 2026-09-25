@@ -59,6 +59,12 @@ class EmergencyEvent(Base):
     )
 
     # Assistance response
+    response_source: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, default=None
+    )  # "SMS" or "MANUAL"
+    assistance_response_status: Mapped[str | None] = mapped_column(
+        String(30), nullable=True, default=None
+    )  # "ACCEPTED" or "REJECTED"
     response_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     responded_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

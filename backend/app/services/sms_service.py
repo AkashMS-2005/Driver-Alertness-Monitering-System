@@ -85,36 +85,36 @@ class SmsService:
                 # 4. Format data
                 short_id = emergency.id.replace("-", "")[-8:].upper()
                 microsleep_count = emergency.microsleep_count if emergency.microsleep_count is not None else 2
-                count_str = (
-                    f"{microsleep_count} separate microsleep events detected."
-                    if microsleep_count != 1
-                    else "1 microsleep event detected."
-                )
-
-                if emergency.status == "DRIVER_RECOVERED":
-                    recovery_status = "DRIVER RECOVERED (AWAKE)"
+                if microsleep_count == 2:
+                    count_str = "Two separate microsleep events detected."
+                elif microsleep_count == 1:
+                    count_str = "1 microsleep event detected."
                 else:
-                    recovery_status = "UNRESPONSIVE / CRITICAL"
+                    count_str = f"{microsleep_count} separate microsleep events detected."
+
+                driver_status = "AWAKE" if emergency.status == "DRIVER_RECOVERED" else "SLEEPING"
 
                 lat_str = f"{emergency.latitude:.6f}" if emergency.latitude is not None else "12.971600"
                 lon_str = f"{emergency.longitude:.6f}" if emergency.longitude is not None else "77.594600"
 
-                # 5. Build SMS Body
+                # 5. Build SMS Body (matching SmartDrive Guardian Emergency format)
                 sms_body = (
                     "SMARTDRIVE GUARDIAN EMERGENCY ALERT\n\n"
-                    f"Emergency ID: #{short_id}\n"
-                    f"Vehicle: {veh_plate}\n"
-                    f"{count_str}\n"
-                    f"Driver recovery status: {recovery_status}\n"
-                    f"Location: {lat_str}, {lon_str}\n"
-                    f"Nearest assistance: {assist_name}\n"
-                    f"Distance: {assist_dist:.1f} km\n\n"
+                    f"Emergency ID: {short_id}\n"
+                    f"Vehicle: {veh_plate}\n\n"
+                    f"{count_str}\n\n"
+                    f"Driver Status: {driver_status}\n\n"
+                    "Location:\n"
+                    f"{lat_str}, {lon_str}\n\n"
+                    "Nearest Assistance:\n"
+                    f"{assist_name}\n\n"
+                    "Distance:\n"
+                    f"{assist_dist:.1f} km\n\n"
                     "Highway assistance is requested.\n\n"
-                    "Reply:\n"
-                    f"ACCEPT {short_id}\n"
-                    "or\n"
-                    f"REJECT {short_id}\n\n"
-                    "SmartDrive Guardian"
+                    "Reply:\n\n"
+                    f"ACCEPT {short_id}\n\n"
+                    "or\n\n"
+                    f"REJECT {short_id}"
                 )
 
                 to_number = settings.TOLL_ASSISTANCE_PHONE_NUMBER
@@ -216,7 +216,7 @@ class SmsService:
         """
         # Validate sender phone number against configured TOLL_ASSISTANCE_PHONE_NUMBER
         configured_toll = settings.TOLL_ASSISTANCE_PHONE_NUMBER
-        if configured_toll and not _phone_numbers_match(from_number, configured_toll):
+        if not configured_toll or not _phone_numbers_match(from_number, configured_toll):
             logger.warning(
                 f"[SMS] Unauthorized sender {from_number} does not match configured TOLL_ASSISTANCE_PHONE_NUMBER ({configured_toll})"
             )
@@ -229,7 +229,7 @@ class SmsService:
         # Parse command: ACCEPT or REJECT (and optional Emergency ID)
         cleaned_body = body.strip()
         match = re.match(
-            r"^(ACCEPT|REJECT)(?:\s+([A-Za-z0-9\-]+))?", cleaned_body, re.IGNORECASE
+            r"^(ACCEPT|REJECT)(?:\s+([A-Za-z0-9\-#]+))?$", cleaned_body, re.IGNORECASE
         )
         if not match:
             return (
@@ -241,7 +241,7 @@ class SmsService:
         action = match.group(1).upper()
         target_token = match.group(2)
         if target_token:
-            target_token = target_token.strip().replace("#", "")
+            target_token = target_token.strip().replace("#", "").replace("-", "")
 
         # Find matching emergency
         target_emergency: Optional[EmergencyEvent] = None
@@ -256,13 +256,25 @@ class SmsService:
             target_emergency = res.scalar_one_or_none()
 
             if not target_emergency:
+                res_all = await db.execute(
+                    select(EmergencyEvent)
+                    .order_by(EmergencyEvent.detected_at.desc())
+                    .limit(25)
+                )
+                for ev in res_all.scalars():
+                    ev_stripped = ev.id.replace("-", "").upper()
+                    if ev_stripped.endswith(target_token.upper()) or ev.id == target_token:
+                        target_emergency = ev
+                        break
+
+            if not target_emergency:
                 return (
                     False,
                     f"SmartDrive Guardian: Emergency #{target_token} not found.",
                     None,
                 )
         else:
-            # If no ID specified, look for active emergencies
+            # If no ID specified, look for active emergencies (Section 5: single active emergency)
             q = (
                 select(EmergencyEvent)
                 .where(EmergencyEvent.status.in_(["ACTIVE", "DRIVER_RECOVERED"]))
@@ -296,56 +308,42 @@ class SmsService:
             )
 
         now = datetime.now(timezone.utc)
+        response_status_standard = "ACCEPTED" if action.startswith("ACCEPT") else "REJECTED"
 
-        if action == "ACCEPT":
-            response_msg = "Highway assistance team has accepted the request."
-            target_emergency.status = "ASSISTANCE_RESPONDED"
-            target_emergency.response_message = response_msg
-            target_emergency.responded_at = now
-
-            # Update HighwayAssistance table record if exists
-            try:
-                assist_res = await db.execute(
-                    select(HighwayAssistance)
-                    .where(HighwayAssistance.emergency_id == target_emergency.id)
-                    .limit(1)
-                )
-                assist = assist_res.scalar_one_or_none()
-                if assist:
-                    assist.status = "ACCEPTED"
-                    assist.resolved_at = now
-            except Exception as e:
-                logger.error(f"[SMS] Could not update HighwayAssistance for {target_emergency.id}: {e}")
-
-            # Notify in-memory risk engine
-            try:
-                from app.risk_engine.emergency_engine import emergency_engine
-                emergency_engine.on_emergency_responded(target_emergency.id)
-            except Exception as eng_err:
-                logger.debug(f"[SMS] Emergency engine sync: {eng_err}")
-
+        if response_status_standard == "ACCEPTED":
+            explanation_msg = "Highway assistance has accepted the emergency request."
             reply_text = f"SmartDrive Guardian: Emergency #{short_id} has been ACCEPTED. Dispatch details recorded."
-
-        else:  # REJECT
-            response_msg = "Highway assistance rejected the request."
-            target_emergency.status = "ASSISTANCE_RESPONDED"
-            target_emergency.response_message = response_msg
-            target_emergency.responded_at = now
-
-            try:
-                assist_res = await db.execute(
-                    select(HighwayAssistance)
-                    .where(HighwayAssistance.emergency_id == target_emergency.id)
-                    .limit(1)
-                )
-                assist = assist_res.scalar_one_or_none()
-                if assist:
-                    assist.status = "REJECTED"
-                    assist.resolved_at = now
-            except Exception as e:
-                logger.error(f"[SMS] Could not update HighwayAssistance for {target_emergency.id}: {e}")
-
+        else:
+            explanation_msg = "Highway assistance rejected the request."
             reply_text = f"SmartDrive Guardian: Emergency #{short_id} has been marked REJECTED."
+
+        # Update EmergencyEvent directly
+        target_emergency.status = "ASSISTANCE_RESPONDED"
+        target_emergency.assistance_response_status = response_status_standard
+        target_emergency.response_source = "SMS"
+        target_emergency.response_message = cleaned_body
+        target_emergency.responded_at = now
+
+        # Update HighwayAssistance table record if exists
+        try:
+            assist_res = await db.execute(
+                select(HighwayAssistance)
+                .where(HighwayAssistance.emergency_id == target_emergency.id)
+                .limit(1)
+            )
+            assist = assist_res.scalar_one_or_none()
+            if assist:
+                assist.status = response_status_standard
+                assist.resolved_at = now
+        except Exception as e:
+            logger.error(f"[SMS] Could not update HighwayAssistance for {target_emergency.id}: {e}")
+
+        # Notify in-memory risk engine
+        try:
+            from app.risk_engine.emergency_engine import emergency_engine
+            emergency_engine.on_emergency_responded(target_emergency.id)
+        except Exception as eng_err:
+            logger.debug(f"[SMS] Emergency engine sync: {eng_err}")
 
         # Update or create EmergencySmsLog
         log_res = await db.execute(
@@ -363,11 +361,9 @@ class SmsService:
             )
             db.add(sms_log)
 
-        response_status_standard = "ACCEPTED" if action.startswith("ACCEPT") else "REJECTED"
-
         sms_log.assistance_phone_number = from_number
         sms_log.assistance_response_status = response_status_standard
-        sms_log.assistance_response_message = response_msg
+        sms_log.assistance_response_message = cleaned_body
         sms_log.assistance_responded_at = now
 
         await db.commit()
@@ -379,7 +375,10 @@ class SmsService:
                 "emergency_id": target_emergency.id,
                 "status": "ASSISTANCE_RESPONDED",
                 "response_status": response_status_standard,
-                "message": response_msg,
+                "response_source": "SMS",
+                "message": explanation_msg,
+                "response_message": cleaned_body,
+                "raw_response": cleaned_body,
                 "responded_at": now.isoformat(),
                 "phone_number": from_number,
             })
