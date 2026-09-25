@@ -1,0 +1,20 @@
+# Environment variables
+.env
+*.env
+backend/.env
+ai-service/.env
+frontend/.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+env/
+.venv/
